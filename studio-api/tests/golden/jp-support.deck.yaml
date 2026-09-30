@@ -1,0 +1,158 @@
+_format_version: '3.0'
+_info:
+  select_tags:
+  - pipeline:jp-support
+services:
+- name: gs-jp-support
+  url: http://localhost:32000
+  tags:
+  - guardrail-studio
+  - pipeline:jp-support
+  routes:
+  - name: gs-jp-support
+    paths:
+    - /pipelines/jp-support
+    methods:
+    - POST
+    strip_path: true
+    tags:
+    - guardrail-studio
+    - pipeline:jp-support
+    plugins:
+    - name: ai-prompt-guard
+      instance_name: gs-jp-support-prompt_guard
+      config:
+        allow_all_conversation_history: false
+        match_all_roles: false
+        deny_patterns:
+        - (?i)ignore (all )?previous instructions
+      tags:
+      - guardrail-studio
+      - pipeline:jp-support
+      ordering:
+        before:
+          access:
+          - datakit
+          - ai-proxy-advanced
+    - name: datakit
+      instance_name: gs-jp-support-datakit
+      config:
+        debug: false
+        nodes:
+        - name: REQ_SEGMENT
+          type: static
+          values:
+            segment:
+              phase: request
+              entry: prompt_guard
+              nodes:
+              - id: pii
+                type: presidio_pii
+                config:
+                  language: ja
+              - id: safety
+                type: llamaguard_safety
+                config:
+                  fail_mode: closed
+              - id: sentiment
+                type: sentiment_kasuhara
+                config:
+                  on_detect: flag
+              - id: is_kasuhara
+                type: condition
+                config:
+                  match: any
+                  rules:
+                  - node: sentiment
+                    field: flags.kasuhara
+                    op: eq
+                    value: true
+              - id: block_kasuhara
+                type: block
+                config:
+                  status: 403
+                  message: カスタマーハラスメントの可能性があるため、このリクエストはブロックされました。
+              edges:
+              - source: prompt_guard
+                target: pii
+              - source: pii
+                target: safety
+              - source: safety
+                target: sentiment
+              - source: sentiment
+                target: is_kasuhara
+              - source: is_kasuhara
+                target: block_kasuhara
+                sourceHandle: 'true'
+        - name: REQ_PAYLOAD
+          type: jq
+          inputs:
+            body: request.body
+            segment: REQ_SEGMENT.segment
+          jq: '{segment: .segment, body: .body}'
+        - name: REQ_GUARD
+          type: call
+          method: POST
+          url: http://guardrail-engine:8080/v1/segments/execute
+          timeout: 10000
+          inputs:
+            body: REQ_PAYLOAD
+        - name: REQ_BODY
+          type: jq
+          input: REQ_GUARD.body
+          jq: .body
+          output: service_request.body
+        - name: REQ_BLOCK_BODY
+          type: jq
+          input: REQ_GUARD.body
+          jq: '{error: {type: "guardrail_blocked", message: .message, node: .blocked_by}}'
+        - name: REQ_BLOCKED_403
+          type: jq
+          input: REQ_GUARD.body
+          jq: .decision == "block" and .status == 403
+        - name: REQ_GATE_403
+          type: branch
+          input: REQ_BLOCKED_403
+          then:
+          - REQ_EXIT_403
+        - name: REQ_EXIT_403
+          type: exit
+          inputs:
+            body: REQ_BLOCK_BODY
+          status: 403
+        - name: REQ_BLOCKED_503
+          type: jq
+          input: REQ_GUARD.body
+          jq: .decision == "block" and .status == 503
+        - name: REQ_GATE_503
+          type: branch
+          input: REQ_BLOCKED_503
+          then:
+          - REQ_EXIT_503
+        - name: REQ_EXIT_503
+          type: exit
+          inputs:
+            body: REQ_BLOCK_BODY
+          status: 503
+      tags:
+      - guardrail-studio
+      - pipeline:jp-support
+      ordering:
+        before:
+          access:
+          - ai-proxy-advanced
+    - name: ai-proxy-advanced
+      instance_name: gs-jp-support-llm
+      config:
+        targets:
+        - route_type: llm/v1/chat
+          model:
+            provider: openai
+            name: gpt-4o-mini
+            options: {}
+          auth:
+            header_name: Authorization
+            header_value: '{vault://env/OPENAI_AUTH_HEADER}'
+      tags:
+      - guardrail-studio
+      - pipeline:jp-support

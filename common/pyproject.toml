@@ -1,0 +1,13 @@
+[project]
+name = "guardrail-common"
+version = "0.1.0"
+description = "Shared pipeline graph model and node catalog for Guardrail Studio"
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2.6", "jsonschema>=4.21"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["guardrail_common"]

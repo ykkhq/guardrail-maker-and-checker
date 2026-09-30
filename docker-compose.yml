@@ -1,0 +1,95 @@
+# Start with scripts/up.sh (it passes the OpenAI key from ~/.openai/creds as an
+# environment variable without writing it to disk). Prerequisite:
+#   cd studio-api && KONNECT_PAT_FILE=~/.kong/kpat uv run python -m guardrail_studio.bootstrap
+name: guardrail-studio
+
+services:
+  kong-dp:
+    image: kong/kong-gateway:3.14
+    env_file: kong/konnect.env          # cluster + telemetry endpoints (from bootstrap)
+    environment:
+      KONG_ROLE: data_plane
+      KONG_DATABASE: "off"
+      KONG_KONNECT_MODE: "on"
+      KONG_VITALS: "off"
+      KONG_CLUSTER_MTLS: pki
+      # PEM contents from scripts/up.sh (the key file stays 0600 on the host).
+      KONG_CLUSTER_CERT:
+      KONG_CLUSTER_CERT_KEY:
+      KONG_LUA_SSL_TRUSTED_CERTIFICATE: system
+      KONG_CLUSTER_DP_LABELS: "created-by:guardrail-studio"
+      KONG_PROXY_LISTEN: "0.0.0.0:8000"
+      KONG_STATUS_LISTEN: "0.0.0.0:8100"
+      KONG_NGINX_WORKER_PROCESSES: "2"
+      # Resolved by {vault://env/OPENAI_AUTH_HEADER} in ai-proxy-advanced.
+      OPENAI_AUTH_HEADER:
+    ports:
+      - "18000:8000"   # proxy: POST http://localhost:18000/pipelines/<slug>
+      - "18100:8100"   # status: /status/ready
+    depends_on:
+      guardrail-engine:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      retries: 10
+
+  guardrail-engine:
+    build:
+      context: .
+      dockerfile: engine/Dockerfile
+    environment:
+      GUARDRAIL_PRELOAD: presidio_pii,sentiment_kasuhara,llamaguard_safety,laya_classify
+      PRESIDIO_LANGUAGES: ja
+      # Llama Guard uses the host's Ollama (Metal-accelerated on macOS).
+      # With --profile ollama, set OLLAMA_HOST=http://ollama:11434 instead.
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    volumes:
+      - models:/models   # Hugging Face cache survives rebuilds
+    ports:
+      - "18080:8080"     # direct access for debugging / dry runs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+      interval: 10s
+      start_period: 300s   # first start downloads the sentiment model
+      retries: 30
+
+  studio-api:
+    build:
+      context: .
+      dockerfile: studio-api/Dockerfile
+    environment:
+      KONNECT_PAT:                     # from scripts/up.sh (~/.kong/kpat)
+      KONNECT_REGION: ${KONNECT_REGION:-us}
+      KONNECT_CONTROL_PLANE: ${KONNECT_CONTROL_PLANE:-guardrail-service}
+      GUARDRAIL_ENGINE_URL: http://guardrail-engine:8080   # written into DataKit (Kong -> engine)
+      KONG_PROXY_URL: http://kong-dp:8000                  # playground live requests
+      KONG_PUBLIC_URL: http://localhost:18000              # shown in the UI
+      STUDIO_CORS_ORIGINS: http://localhost:13000,http://localhost:5173
+    volumes:
+      - studio-data:/data
+    ports:
+      - "18200:8000"
+    depends_on:
+      guardrail-engine:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    ports:
+      - "13000:80"     # Guardrail Studio UI
+    depends_on:
+      - studio-api
+
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:latest
+    volumes:
+      - ollama:/root/.ollama
+
+volumes:
+  models:
+  ollama:
+  studio-data:

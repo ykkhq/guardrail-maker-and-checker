@@ -1,0 +1,25 @@
+{
+  "slug": "jp-support",
+  "name": "JP customer support",
+  "nodes": [
+    {"id": "in", "type": "prompt_in"},
+    {"id": "prompt_guard", "type": "ai_prompt_guard", "config": {"deny_patterns": ["(?i)ignore (all )?previous instructions"]}},
+    {"id": "pii", "type": "presidio_pii", "config": {"language": "ja"}},
+    {"id": "safety", "type": "llamaguard_safety", "config": {"fail_mode": "closed"}},
+    {"id": "sentiment", "type": "sentiment_kasuhara", "config": {"on_detect": "flag"}},
+    {"id": "is_kasuhara", "type": "condition", "config": {"match": "any", "rules": [{"node": "sentiment", "field": "flags.kasuhara", "op": "eq", "value": true}]}},
+    {"id": "block_kasuhara", "type": "block", "config": {"status": 403, "message": "カスタマーハラスメントの可能性があるため、このリクエストはブロックされました。"}},
+    {"id": "llm", "type": "llm", "config": {"provider": "openai", "model": "gpt-4o-mini", "auth_header_value": "{vault://env/OPENAI_AUTH_HEADER}"}},
+    {"id": "out", "type": "response_out"}
+  ],
+  "edges": [
+    {"source": "in", "target": "prompt_guard"},
+    {"source": "prompt_guard", "target": "pii"},
+    {"source": "pii", "target": "safety"},
+    {"source": "safety", "target": "sentiment"},
+    {"source": "sentiment", "target": "is_kasuhara"},
+    {"source": "is_kasuhara", "sourceHandle": "true", "target": "block_kasuhara"},
+    {"source": "is_kasuhara", "sourceHandle": "false", "target": "llm"},
+    {"source": "llm", "target": "out"}
+  ]
+}

@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+*.db
+kong/certs/
+kong/konnect.env
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
