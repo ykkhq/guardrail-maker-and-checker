@@ -31,6 +31,8 @@ def run_detector(registry: Registry, node_type: str, doc: ChatDoc, config: dict[
     """Masking detectors run on every guarded text; checks run on the primary text."""
     t0 = time.perf_counter()
     detector = registry.get(node_type)
+    # Detectors that phrase their check per phase (Llama Guard: User vs Agent) read this.
+    config = {**config, "_phase": doc.phase}
     try:
         if transforms and config.get("on_detect") == "mask":
             merged = DetectorResult()
@@ -119,6 +121,10 @@ def run_segment(segment: Segment, body: dict[str, Any], registry: Registry) -> S
             step.outcome = "error_open"
         elif res.detected:
             action = cfg.get("on_detect", "block")
+            # Honor schema restrictions even for unvalidated graphs: Laya may only flag.
+            prop = nt.config_schema.get("properties", {}).get("on_detect", {})
+            if "enum" in prop and action not in prop["enum"]:
+                action = prop["default"]
             if action == "block":
                 step.outcome = "block"
                 return block(node_id, cfg.get("block_status", 403), cfg.get("block_message", "Request blocked by guardrail policy."))

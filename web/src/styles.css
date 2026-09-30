@@ -30,7 +30,8 @@
 * { box-sizing: border-box; }
 body { margin: 0; }
 button, input, select, textarea { font: inherit; color: inherit; }
-code, .mono, pre { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; }
+/* No ligatures: they draw prompt tokens like <|eot_id|> as arrows. */
+code, .mono, pre, textarea.json-text { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; font-variant-ligatures: none; }
 .muted { color: var(--muted); }
 .pad { padding: 14px 16px; }
 .error { color: var(--o-block); }
@@ -234,3 +235,52 @@ pre.code { max-height: 60vh; overflow: auto; font-size: 11px; }
 .toast.ok { background: #11703a; }
 .toast.error { background: #a51c1c; }
 .toast.info { background: #1b2330; }
+
+/* JSON text editor field (e.g. Laya questions) */
+.json-field { margin-bottom: 12px; }
+.json-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.json-actions, .json-insert { display: flex; gap: 2px; align-items: center; flex-wrap: wrap; }
+.json-insert { margin: 2px 0 6px; font-size: 12px; }
+.inspector textarea.json-text {
+  font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11.5px; line-height: 1.45;
+  tab-size: 2; white-space: pre; overflow: auto; resize: vertical; background: #fbfcfd;
+}
+.inspector textarea.json-text.invalid { border-color: #e59a9a; background: #fffafa; }
+
+/* condition rule editor */
+.cond { display: grid; gap: 10px; }
+.cond-match { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cond-match select { width: auto !important; }
+.t-true { color: var(--o-pass); }
+.t-false { color: var(--o-block); }
+.rule { border: 1px solid var(--line); border-left: 3px solid var(--k-control); border-radius: 6px; padding: 8px 10px 4px; background: #fcfcfd; }
+.rule-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-weight: 600; }
+.rule .field { margin-bottom: 8px; }
+.rule .field small { font-size: 11px; line-height: 1.35; }
+.rule-row { display: grid; grid-template-columns: 110px 1fr; gap: 6px; margin-bottom: 8px; align-items: start; }
+.checks { display: flex; flex-wrap: wrap; gap: 4px 10px; padding-top: 4px; }
+.checks label { display: flex; align-items: center; gap: 4px; font-size: 12px; }
+.inspector .checks input[type=checkbox] { width: auto; min-height: 0; }
+.cond-summary { background: #f5f7fa; border-radius: 6px; padding: 8px; margin: 0; line-height: 1.6; }
+.cond-summary code { background: #fff; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+
+/* Llama Guard safety policy editor */
+.policy { margin-bottom: 12px; }
+.cats { list-style: none; padding: 0; margin: 6px 0 8px; display: grid; gap: 4px; }
+.cats li { border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; background: #fff; }
+.cats li.off { background: #f6f7f9; }
+.cats li.off .cat-name { color: var(--muted); text-decoration: line-through; }
+.cat-row { display: grid; grid-template-columns: auto 34px 1fr repeat(2, 26px); gap: 4px; align-items: center; }
+.inspector .cat-row input[type=checkbox] { width: auto; min-height: 0; }
+.inspector .cat-row .btn { height: 24px; padding: 0; font-size: 12px; }
+.cat-row .has-desc { color: var(--accent); font-weight: 700; }
+.cat-code { font-family: "JetBrains Mono", monospace; font-size: 11px; font-weight: 700; color: var(--k-custom); text-align: center; }
+.cats li.off .cat-code { color: var(--muted); font-weight: 400; }
+.inspector input.cat-name { min-height: 26px; padding: 2px 6px; border-color: transparent; }
+.inspector input.cat-name:hover, .inspector input.cat-name:focus { border-color: var(--line-strong); }
+.cat-detail { display: grid; gap: 6px; padding: 6px 2px 4px 40px; }
+.cat-detail label { display: grid; gap: 2px; font-size: 11px; color: var(--muted); }
+.preview { margin-top: 12px; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+.preview summary { cursor: pointer; font-weight: 600; }
+.preview .row { margin: 8px 0 0; }
+.preview pre.code { max-height: 360px; font-size: 11px; }

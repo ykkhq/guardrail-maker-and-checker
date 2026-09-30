@@ -80,3 +80,116 @@ def test_partial_vault_reference_warns(graph_of):
     warns = [i.message for i in validate(g).issues if i.level == "warning"]
     assert any("whole value" in w for w in warns)
     assert not [i for i in validate(graph_of()).issues if i.level == "warning"]
+
+
+def _with_laya(graph_of, laya_cfg, rule=None):
+    """jp-support with a Laya node between sentiment and the condition."""
+    def mutate(d):
+        d["nodes"].append({"id": "triage", "type": "laya_classify", "config": laya_cfg})
+        d["edges"] = [e for e in d["edges"] if e["source"] != "sentiment"] + [
+            {"source": "sentiment", "target": "triage"}, {"source": "triage", "target": "is_kasuhara"}]
+        if rule:
+            d["nodes"][5]["config"]["rules"].append(rule)
+    return graph_of(mutate)
+
+
+def test_laya_presets_and_custom_question_are_valid(graph_of):
+    custom = {"questions": {"wants_human": {"type": "noul", "instructions": "Does `message` ask for a human?"}},
+              "detect_on": ["wants_human"]}
+    assert validate(_with_laya(graph_of, {})).ok
+    assert validate(_with_laya(graph_of, custom,
+                               {"node": "triage", "field": "flags.wants_human", "op": "eq", "value": True})).ok
+
+
+@pytest.mark.parametrize("cfg, expected", [
+    ({"questions": {"intent": {"type": "choice", "instructions": "x"}}, "detect_on": []}, "'criteria' is a required property"),
+    ({"questions": {"u": {"type": "score", "instructions": "x", "criteria": ["a", "b"], "threshold": 0.5}},
+      "detect_on": []}, "is not of type 'integer'"),
+    ({"questions": {"Bad Name": {"type": "noul", "instructions": "x"}}, "detect_on": []}, "does not match"),
+    ({"questions": {"p": {"type": "noul", "instructions": "x", "extra": 1}}, "detect_on": []}, "Additional properties"),
+    ({"detect_on": ["department"]}, "'department' is not one of the questions"),
+    ({"detect_on": ["intent"]}, "is a choice question"),
+    ({"questions": {"u": {"type": "score", "instructions": "x", "criteria": ["a", "b"], "threshold": 5}},
+      "detect_on": ["u"]}, "above the top level (1)"),
+])
+def test_invalid_laya_config(graph_of, cfg, expected):
+    errs = [i.message for i in validate(_with_laya(graph_of, cfg)).issues if i.level == "error" and i.node == "triage"]
+    assert any(expected in e for e in errs), errs
+
+
+def test_condition_on_unknown_laya_question_is_rejected(graph_of):
+    g = _with_laya(graph_of, {}, {"node": "triage", "field": "flags.department", "op": "eq", "value": "hr"})
+    errs = [i.message for i in validate(g).issues if i.level == "error"]
+    assert any("'flags.department' is not a result of 'triage'" in e and "flags.intent" in e for e in errs), errs
+
+
+@pytest.mark.parametrize("rule, expected", [
+    ({"field": "detected", "op": "gte", "value": 0.8}, "'detected' is boolean: use eq/ne"),
+    ({"field": "flags.pii", "op": "eq", "value": "yes"}, "value must be true or false"),
+    ({"field": "flags.intent", "op": "eq", "value": "refund"}, "has no value 'refund'"),
+    ({"field": "flags.intent", "op": "in", "value": "billing"}, "'in' needs a list"),
+    ({"field": "flags.urgency", "op": "gte", "value": 7}, "ranges 0..3"),
+    ({"field": "details.scores.pii", "op": "gt", "value": True}, "must be a number"),
+])
+def test_laya_rule_must_fit_the_question_type(graph_of, rule, expected):
+    g = _with_laya(graph_of, {}, {"node": "triage", **rule})
+    errs = [i.message for i in validate(g).issues if i.level == "error"]
+    assert any(expected in e for e in errs), errs
+
+
+@pytest.mark.parametrize("rule", [
+    {"field": "flags.intent", "op": "eq", "value": "complaint"},
+    {"field": "flags.intent", "op": "in", "value": ["billing", "cancellation"]},
+    {"field": "flags.urgency", "op": "gte", "value": 2},
+    {"field": "flags.security_risk", "op": "eq", "value": True},
+    {"field": "details.scores.pii", "op": "gt", "value": 0.95},
+    {"field": "detected", "op": "eq", "value": True},
+])
+def test_laya_rules_that_fit(graph_of, rule):
+    assert validate(_with_laya(graph_of, {}, {"node": "triage", **rule})).ok
+
+
+def test_laya_cannot_block(graph_of):
+    errs = [i.message for i in validate(_with_laya(graph_of, {"on_detect": "block"})).issues if i.node == "triage"]
+    assert any("on_detect" in e and "'flag'" in e for e in errs), errs
+
+
+def test_rule_on_node_after_the_condition_is_rejected(graph_of):
+    def mutate(d):
+        d["nodes"].append({"id": "late", "type": "keyword_blocklist", "config": {"keywords": ["x"]}})
+        d["edges"] = [e for e in d["edges"] if e["source"] != "llm"] + [
+            {"source": "llm", "target": "late"}, {"source": "late", "target": "out"}]
+        d["nodes"][5]["config"]["rules"].append({"node": "late", "field": "detected", "op": "eq", "value": True})
+    errs = [i.message for i in validate(graph_of(mutate)).issues if i.level == "error"]
+    assert any("does not run before this condition" in e for e in errs), errs
+
+
+def test_default_rule_for_laya_prefers_a_choice_question():
+    from guardrail_common.outputs import default_rule
+
+    assert default_rule("triage", "laya_classify", {}) == {
+        "node": "triage", "field": "flags.intent", "op": "eq", "value": "question"}
+    only_noul = {"questions": {"wants_human": {"type": "noul", "instructions": "x"}}, "detect_on": []}
+    assert default_rule("t", "laya_classify", only_noul) == {
+        "node": "t", "field": "flags.wants_human", "op": "eq", "value": True}
+    assert default_rule("s", "sentiment_kasuhara", {})["field"] == "flags.kasuhara"
+
+
+def test_llamaguard_policy_drives_condition_fields_and_checks(graph_of):
+    from guardrail_common.outputs import result_fields
+
+    policy = [{"id": "violent_crimes", "name": "Violent Crimes"},
+              {"id": "competitors", "name": "Competitor Mentions", "description": "asks about competitors"}]
+    f = next(x for x in result_fields("llamaguard_safety", {"policy": policy}) if x["field"] == "flags.categories")
+    assert [v["value"] for v in f["values"]] == ["violent_crimes", "competitors"]
+
+    def mutate(d, rule_value, cfg):
+        d["nodes"][3]["config"].update(cfg, on_detect="flag")
+        d["nodes"][5]["config"]["rules"].append(
+            {"node": "safety", "field": "flags.categories", "op": "contains", "value": rule_value})
+    ok = graph_of(lambda d: mutate(d, "competitors", {"policy": policy}))
+    assert validate(ok).ok, [i.message for i in validate(ok).issues]
+    bad = graph_of(lambda d: mutate(d, "hate", {"policy": policy}))
+    assert any("never contains 'hate'" in i.message for i in validate(bad).issues)
+    none_on = graph_of(lambda d: d["nodes"][3]["config"].update(policy=[{**policy[0], "enabled": False}]))
+    assert any("enable at least one category" in i.message for i in validate(none_on).issues)

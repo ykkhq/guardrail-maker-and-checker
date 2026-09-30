@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 import jsonschema
 
-from guardrail_common import catalog
+from guardrail_common import catalog, llamaguard, outputs
 from guardrail_common.graph import PipelineGraph, topo_order
 
 REQUEST, RESPONSE = catalog.REQUEST, catalog.RESPONSE
@@ -72,6 +72,23 @@ def _is_whole_vault_ref(value: str) -> bool:
     return bool(re.fullmatch(r"\{vault://[^{}]+\}", value.strip()))
 
 
+def _laya_issues(cfg: dict[str, Any]) -> list[str]:
+    """Cross-field checks for Laya questions that JSON Schema cannot express."""
+    questions = cfg.get("questions") or {}
+    out = []
+    for name in cfg.get("detect_on", []):
+        q = questions.get(name)
+        if q is None:
+            out.append(f"detect_on: '{name}' is not one of the questions ({', '.join(questions) or 'none'})")
+        elif q.get("type") == "choice":
+            out.append(f"detect_on: '{name}' is a choice question; branch on flags.{name} with a condition instead")
+    for name, q in questions.items():
+        if q.get("type") == "score" and "threshold" in q and q["threshold"] >= len(q.get("criteria", [])):
+            out.append(f"questions.{name}.threshold: {q['threshold']} is above the top level "
+                       f"({len(q.get('criteria', [])) - 1})")
+    return out
+
+
 def validate(graph: PipelineGraph) -> Analysis:
     a = Analysis()
 
@@ -118,9 +135,14 @@ def validate(graph: PipelineGraph) -> Analysis:
         return a
 
     succ: dict[str, list[str]] = {}
+    pred: dict[str, list[str]] = {}
     for e in graph.edges:
         succ.setdefault(e.source, []).append(e.target)
+        pred.setdefault(e.target, []).append(e.source)
     out_edges = graph.successors()
+
+    def ancestors(node_id: str) -> set[str]:
+        return _reachable(node_id, pred) - {node_id}
 
     # --- phases: request = reachable from start before the LLM; response = after it
     req = _reachable(a.start, succ, stop={a.llm}) - {a.llm}
@@ -155,6 +177,16 @@ def validate(graph: PipelineGraph) -> Analysis:
         except jsonschema.ValidationError as exc:
             path = ".".join(str(p) for p in exc.absolute_path) or "config"
             a.error(f"{path}: {exc.message}", n.id)
+        schema_ok = not any(i.node == n.id and i.level == "error" for i in a.issues)
+        if n.type == "laya_classify" and schema_ok:
+            for msg in _laya_issues(cfg):
+                a.error(msg, n.id)
+        if n.type == "llamaguard_safety" and schema_ok:
+            errs, warns = llamaguard.policy_issues(cfg)
+            for msg in errs:
+                a.error(msg, n.id)
+            for msg in warns:
+                a.warn(msg, n.id)
         for key, prop in nt.config_schema.get("properties", {}).items():
             if not (prop.get("x-secret") and cfg.get(key)):
                 continue
@@ -187,6 +219,12 @@ def validate(graph: PipelineGraph) -> Analysis:
                     a.error(f"condition rule references unknown node '{r.get('node')}'", n.id)
                 elif catalog.get(graph.node(r["node"]).type).kind != "custom":
                     a.error(f"condition rule must reference a custom detector node, not '{r['node']}'", n.id)
+                elif r["node"] not in ancestors(n.id):
+                    a.error(f"condition rule reads '{r['node']}', which does not run before this condition", n.id)
+                else:
+                    src = graph.node(r["node"])
+                    if msg := outputs.check_rule(r, outputs.result_fields(src.type, src.config)):
+                        a.error(f"rule on '{r['node']}': {msg}", n.id)
 
     if not a.ok:
         return a

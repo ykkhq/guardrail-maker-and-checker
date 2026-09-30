@@ -107,12 +107,63 @@ studio-api environment variables:
 - `GUARDRAIL_ENGINE_URL`: engine URL written into the DataKit `call` node.
 - `STUDIO_CORS_ORIGINS`: allowed origins for the Web UI.
 
+## Laya questions (typed triage)
+
+The **Laya Classifier** node asks your own questions about the prompt in a single model pass. In the Inspector you edit `questions` as JSON text. **+ yes/no / + choice / + score** insert a template question, and **Reset to presets** restores the defaults.
+
+| Type | Laya answer | `flags.<name>` | Counts as a hit (`detect_on`) when |
+|---|---|---|---|
+| `noul` | yes/no probability | `true` if ≥ `threshold` (default 0.75) | the flag is true |
+| `choice` | one label from `criteria` (object) | the label | never; branch on the label |
+| `score` | a level from `criteria` (list) | level number (0…n-1) | level ≥ `threshold` (default: top level) |
+
+The presets are `pii` (noul), `intent` (choice), `urgency` (score) and `security_risk` (noul). Refer to the prompt as `` `message` `` in `instructions`. `threshold` is Guardrail Studio's own field and is stripped before the questions are sent to Laya. Probabilities go in `details.scores.<name>`.
+
+Laya always **flags**: it never blocks on its own. Put a **Condition** node after it to decide what happens.
+
+The condition's rule editor builds rules from the answers of the detectors that run before it:
+- **Source:** only those upstream detectors.
+- **Field:** the source's outputs; for Laya, one entry per question.
+- **Operator and value:** match the field type. Yes/no questions get `is true/false`, choice questions get their labels (`is`, `is one of`), score questions get their levels (`≥ 2: urgent, blocking work`), and probabilities get a number.
+
+Connecting a detector to an empty condition creates a first rule, such as `intent is question` for the Laya presets. Examples:
+- `flags.intent eq "complaint"`
+- `flags.urgency gte 2`
+- `details.scores.pii gt 0.95`
+
+Validation catches:
+- malformed questions
+- `detect_on` naming a missing or `choice` question
+- a score threshold above the top level
+- rules on a node that doesn't run before the condition
+- rules on fields the source doesn't produce
+- operators or values that don't fit the field (e.g. `detected gte 0.8`, since `detected` is true/false)
+
+The same field list (`guardrail_common/outputs.py`) drives both the editor and the validator.
+
+In tests with Japanese support prompts, `intent` and custom questions were accurate. `pii` and `security_risk` still flag harmless prompts even at 0.9, and `urgency` rated most prompts 1–2, even one with a 10-minute deadline. Use Presidio and Llama Guard for blocking, and Laya for routing.
+
+## Llama Guard safety policy and task instruction
+
+The **Llama Guard Safety** node's Inspector has two settings:
+- **Task instruction:** the first line of the Llama Guard prompt. `{role}` becomes *User* for request checks and *Agent* for response checks.
+- **Safety policy:** the unsafe content categories. You can switch each one on or off, rename it, give it a description, or add your own. **Preview prompt** shows the exact text sent to the model.
+
+The engine builds the prompt itself and sends it to Ollama in raw mode (`guardrail_common/llamaguard.py`). With the default settings it matches the prompt from Ollama's `llama-guard3` template: in tests the answers were identical. Unlike that template, the final instruction names the right role for response checks.
+
+How the policy is applied, based on tests with `llama-guard3:1b`:
+- **Codes are fixed.** Standard categories keep S1–S14; custom categories get S15 and up. The 1B model answers with its trained codes whatever the prompt lists, so renumbering would mislabel its answers.
+- **Disabling filters the answer.** A disabled category is ignored in Llama Guard's answer: e.g. turning off *Privacy* lets contact details through, while weapons prompts are still blocked. The trained categories S1–S13 are still listed in the prompt. Removing one from the prompt makes the 1B model pick another code (a PII prompt came back as S1 Violent Crimes).
+- **Custom categories and task changes need a model that follows the prompt**, such as `llama-guard3:8b` (set `model` on the node). The 1B model ignored custom categories and descriptions in every test.
+
+Condition rules can branch on `flags.categories contains <id>`; the editor lists the enabled categories.
+
 ## Changes from the guardrail_agent prototype
 
 - The sentiment model default is now `koheiduck/bert-japanese-finetuned-sentiment`. `cl-tohoku/bert-base-japanese-v3` has no classification head, so its labels were random.
 - Llama Guard calls the Ollama REST API directly and honors `fail_mode`.
 - Presidio's language comes from node config.
-- Laya results are returned as flags that condition nodes can branch on.
+- Laya questions are configurable (see above), and their answers are flags that condition nodes can branch on.
 
 ## To verify on a real data plane (Phase 0 spike)
 

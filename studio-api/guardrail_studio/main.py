@@ -1,8 +1,9 @@
 """studio-api HTTP API for the Web UI.
 
   GET    /v1/catalog                         node types (palette + inspector forms)
-  POST   /v1/validate                        issues to show on the canvas
+  POST   /v1/validate                        issues, plus rule fields per detector for the condition editor
   POST   /v1/compile                         Kong entities (format=deck for a decK file)
+  POST   /v1/preview/llamaguard              the Llama Guard prompt for a node config
   GET    /v1/pipelines                       saved pipelines
   GET    /v1/pipelines/{slug}                one pipeline graph
   PUT    /v1/pipelines/{slug}                save a graph (canvas positions included)
@@ -32,6 +33,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from guardrail_common import catalog, llamaguard, outputs
 from guardrail_common.catalog import CATALOG
 from guardrail_common.graph import PipelineGraph
 from guardrail_studio.compiler import CompileError, CompileOptions, compile_pipeline, to_deck, validate
@@ -52,6 +54,12 @@ class PlaygroundRequest(BaseModel):
     messages: list[dict[str, Any]] = Field(min_length=1)
     # Dry runs use this unsaved graph from the canvas when given.
     graph: PipelineGraph | None = None
+
+
+class LlamaGuardPreview(BaseModel):
+    config: dict[str, Any] = Field(default_factory=dict)
+    phase: Literal["request", "response"] = "request"
+    text: str = "<message>"
 
 
 class Settings:
@@ -144,7 +152,16 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
                                "message": f"the guardrail engine cannot run '{n.type}': missing Python "
                                           f"module(s) {', '.join(info['missing'])} (rebuild the engine image with them)"})
         ok = not any(i["level"] == "error" for i in issues)
-        return {"ok": ok, "issues": issues, "phases": a.phase}
+        # Condition editor data: what each detector outputs, and a first rule to suggest.
+        fields, default_rules = {}, {}
+        for n in graph.nodes:
+            if CATALOG.get(n.type) and CATALOG[n.type].kind == "custom":
+                try:
+                    fields[n.id] = outputs.result_fields(n.type, n.config)
+                    default_rules[n.id] = outputs.default_rule(n.id, n.type, n.config)
+                except (TypeError, AttributeError, KeyError):
+                    fields[n.id] = []  # malformed config: validation already reports it
+        return {"ok": ok, "issues": issues, "phases": a.phase, "fields": fields, "default_rules": default_rules}
 
     @app.post("/v1/compile")
     def post_compile(req: CompileRequest):
@@ -159,6 +176,13 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
         )
         return {"ok": True, "result": result, "stages": [s.describe() for s in compiled.stages],
                 "warnings": compiled.warnings}
+
+    @app.post("/v1/preview/llamaguard")
+    def preview_llamaguard(req: LlamaGuardPreview) -> dict:
+        """The exact prompt the engine sends to Llama Guard for this node config."""
+        cfg = catalog.with_defaults("llamaguard_safety", req.config)
+        return {"prompt": llamaguard.build_prompt(req.text, cfg, req.phase),
+                "codes": llamaguard.codes(cfg.get("policy"))}
 
     # --- pipelines -------------------------------------------------------------------
 

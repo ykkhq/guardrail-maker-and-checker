@@ -99,3 +99,30 @@ export interface DeployResult {
   error?: string;
   graph?: PipelineGraph;
 }
+
+// Condition editor: what a detector node outputs (from /v1/validate).
+export interface FieldDescriptor {
+  field: string;
+  label: string;
+  type: "boolean" | "number" | "integer" | "string" | "enum" | "list";
+  ops: string[];
+  values?: { value: string | number; label: string }[];
+  min?: number;
+  max?: number;
+  help?: string;
+}
+
+export interface Rule {
+  node: string;
+  field: string;
+  op: string;
+  value: unknown;
+}
+
+export interface ValidateResult {
+  ok: boolean;
+  issues: Issue[];
+  phases: Record<string, string>;
+  fields: Record<string, FieldDescriptor[]>;
+  default_rules: Record<string, Rule | null>;
+}

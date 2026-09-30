@@ -50,3 +50,16 @@ class Broken(Detector):
 
 def chat(*user_texts: str) -> dict:
     return {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": t} for t in user_texts]}
+
+
+class FakeLaya(Detector):
+    """Answers the preset questions: a complaint, detected via pii."""
+
+    type = "laya_classify"
+
+    def detect(self, text: str, config: dict[str, Any]) -> DetectorResult:
+        from guardrail_engine.detectors.laya_classify import interpret
+
+        answers = {"pii": {"noul": 0.95}, "intent": {"choice": "complaint", "probabilities": {"complaint": 0.8}},
+                   "urgency": {"score": 1.0}, "security_risk": {"noul": 0.1}}
+        return interpret(config["questions"], answers, config["detect_on"])

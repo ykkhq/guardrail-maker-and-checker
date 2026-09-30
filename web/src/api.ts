@@ -1,5 +1,5 @@
 import type {
-  DeployResult, Issue, NodeType, PipelineGraph, PipelineSummary, PlaygroundResult, Status,
+  DeployResult, Issue, NodeType, PipelineGraph, PipelineSummary, PlaygroundResult, Status, ValidateResult,
 } from "./types";
 
 const BASE = "/api/v1";
@@ -21,8 +21,7 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 export const api = {
   catalog: () => call<{ node_types: NodeType[] }>("GET", "/catalog").then((r) => r.node_types),
   status: () => call<Status>("GET", "/status"),
-  validate: (g: PipelineGraph) =>
-    call<{ ok: boolean; issues: Issue[]; phases: Record<string, string> }>("POST", "/validate", g),
+  validate: (g: PipelineGraph) => call<ValidateResult>("POST", "/validate", g),
   compile: (g: PipelineGraph) =>
     call<{ ok: boolean; result?: unknown; stages?: DeployResult["stages"]; warnings?: string[]; issues?: Issue[] }>(
       "POST", "/compile", { graph: g, format: "deck" }),
@@ -35,6 +34,8 @@ export const api = {
     call<{ versions: { version: number; deployed_at: number }[] }>("GET", `/pipelines/${slug}/versions`)
       .then((r) => r.versions),
   rollback: (slug: string, v: number) => call<DeployResult>("POST", `/pipelines/${slug}/rollback/${v}`),
+  previewLlamaGuard: (config: Record<string, unknown>, phase: "request" | "response", text: string) =>
+    call<{ prompt: string; codes: Record<string, string> }>("POST", "/preview/llamaguard", { config, phase, text }),
   playground: (slug: string, mode: "live" | "dry", messages: unknown[], graph?: PipelineGraph) =>
     call<PlaygroundResult>("POST", "/playground", { slug, mode, messages, graph }),
 };

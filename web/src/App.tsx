@@ -12,7 +12,7 @@ import { DRAG_TYPE, Palette } from "./components/Palette";
 import { Playground } from "./components/Playground";
 import { ConfigPanel, IssuesPanel } from "./components/SidePanels";
 import type {
-  Issue, NodeType, PipelineGraph, PipelineSummary, PlaygroundResult, SegmentResponse, Status,
+  Issue, NodeType, PipelineGraph, PipelineSummary, PlaygroundResult, SegmentResponse, Status, ValidateResult,
 } from "./types";
 
 const nodeTypes = { guard: GuardNodeView };
@@ -29,6 +29,10 @@ export default function App() {
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [saved, setSaved] = useState("");
   const [issues, setIssues] = useState<Issue[]>([]);
+  // For the condition editor: result fields and a suggested rule per detector node.
+  const [fields, setFields] = useState<ValidateResult["fields"]>({});
+  const [defaultRules, setDefaultRules] = useState<ValidateResult["default_rules"]>({});
+  const [phases, setPhases] = useState<ValidateResult["phases"]>({});
   const [compiled, setCompiled] = useState<Awaited<ReturnType<typeof api.compile>> | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("inspector");
@@ -108,6 +112,9 @@ export default function App() {
       try {
         const v = await api.validate(graph);
         setIssues(v.issues);
+        setFields(v.fields ?? {});
+        setDefaultRules(v.default_rules ?? {});
+        setPhases(v.phases ?? {});
         setCompiled(v.ok ? await api.compile(graph) : null);
       } catch (e: any) {
         setIssues([{ level: "error", message: e.message, node: null, edge: null }]);
@@ -151,9 +158,43 @@ export default function App() {
   // --- canvas editing ----------------------------------------------------------------
 
   const onConnect = useCallback(
-    (c: Connection) =>
-      setEdges((eds) => addEdge(toFlowEdge({ source: c.source, target: c.target, sourceHandle: c.sourceHandle }), eds)),
-    [setEdges],
+    (c: Connection) => {
+      setEdges((eds) => addEdge(toFlowEdge({ source: c.source, target: c.target, sourceHandle: c.sourceHandle }), eds));
+      // Detector -> empty condition: start it with a rule built from the detector's
+      // outputs (for Laya, its first choice question).
+      const src = nodes.find((n) => n.id === c.source);
+      const dst = nodes.find((n) => n.id === c.target);
+      const rules = (dst?.data.config.rules as unknown[] | undefined) ?? [];
+      if (src && dst && dst.data.nodeType === "condition" && !rules.length && catalog[src.data.nodeType]?.kind === "custom") {
+        const rule = defaultRules[src.id] ?? { node: src.id, field: "detected", op: "eq", value: true };
+        setNodes((ns) => ns.map((n) => (n.id === dst.id ? { ...n, data: { ...n.data, config: { ...n.data.config, rules: [rule] } } } : n)));
+      }
+    },
+    [setEdges, setNodes, nodes, catalog, defaultRules],
+  );
+
+  // Detector nodes that run before `id`, nearest last (the condition editor's sources).
+  const upstreamOf = useCallback(
+    (id: string) => {
+      const pred: Record<string, string[]> = {};
+      for (const e of edges) (pred[e.target] ??= []).push(e.source);
+      const seen = new Set<string>();
+      const order: string[] = [];
+      const visit = (n: string) => {
+        for (const p of pred[n] ?? []) {
+          if (seen.has(p)) continue;
+          seen.add(p);
+          visit(p);
+          order.push(p);
+        }
+      };
+      visit(id);
+      return order
+        .map((nid) => nodes.find((n) => n.id === nid))
+        .filter((n): n is GuardNode => !!n && catalog[n.data.nodeType]?.kind === "custom")
+        .map((n) => ({ id: n.id, label: `${n.data.label || catalog[n.data.nodeType].label} (${n.id})` }));
+    },
+    [edges, nodes, catalog],
   );
 
   const isValidConnection: IsValidConnection = useCallback(
@@ -423,9 +464,11 @@ export default function App() {
                   <Inspector
                     node={selectedNode}
                     nodeType={catalog[selectedNode.data.nodeType]}
-                    allNodes={nodes}
-                    catalog={catalog}
                     issues={issues.filter((i) => i.node === selectedNode.id)}
+                    upstream={selectedNode.data.nodeType === "condition" ? upstreamOf(selectedNode.id) : []}
+                    fields={fields}
+                    defaultRules={defaultRules}
+                    phase={phases[selectedNode.id] === "response" ? "response" : "request"}
                     onChange={(cfg, label) => updateNode(selectedNode.id, cfg, label)}
                     onDelete={() => deleteNode(selectedNode.id)}
                   />

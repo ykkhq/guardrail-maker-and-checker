@@ -76,3 +76,19 @@ def test_fan_out_from_virtual_entry(registry):
 def test_bad_entry_raises(registry):
     with pytest.raises(ValueError):
         run_segment(Segment(entry="nope", nodes=[Node(id="a", type="regex_pii")]), chat("hi"), registry)
+
+
+def test_laya_never_blocks_even_if_config_says_so(jp_support):
+    from engine_fakes import FakeLaya
+    from guardrail_engine.detectors import Registry
+
+    seg = Segment(entry="in",
+                  nodes=[Node(id="triage", type="laya_classify", config={"on_detect": "block"}),
+                         Node(id="c", type="condition", config={"rules": [
+                             {"node": "triage", "field": "flags.intent", "op": "eq", "value": "complaint"}]}),
+                         Node(id="stop", type="block", config={"status": 409})],
+                  edges=[Edge(source="in", target="triage"), Edge(source="triage", target="c"),
+                         Edge(source="c", target="stop", sourceHandle="true")])
+    res = run_segment(seg, chat("まったく、ひどいサービスだ"), Registry([FakeLaya()]))
+    assert [s.outcome for s in res.trace] == ["flag", "branch_true", "block"]
+    assert (res.blocked_by, res.status) == ("stop", 409)

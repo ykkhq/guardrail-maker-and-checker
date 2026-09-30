@@ -4,22 +4,35 @@ import validator from "@rjsf/validator-ajv8";
 import type { RJSFSchema, UiSchema } from "@rjsf/utils";
 import type { GuardNode } from "../graph";
 import { KIND_LABEL } from "../graph";
-import type { Issue, JsonSchema, NodeType } from "../types";
+import { JsonTextField } from "./JsonTextField";
+import { PolicyField } from "./PolicyField";
+import { PromptPreview } from "./PromptPreview";
+import type { FieldDescriptor, Issue, JsonSchema, NodeType, Rule } from "../types";
+import { ConditionEditor, type Upstream } from "./ConditionEditor";
 
 interface Props {
   node: GuardNode;
   nodeType: NodeType;
-  allNodes: GuardNode[];
-  catalog: Record<string, NodeType>;
   issues: Issue[];
+  // Condition nodes: detectors that run before this node, and what they output.
+  upstream: Upstream[];
+  fields: Record<string, FieldDescriptor[]>;
+  defaultRules: Record<string, Rule | null>;
+  // request/response, from validation (Llama Guard phrases its check per phase).
+  phase: "request" | "response";
   onChange: (config: Record<string, unknown>, label: string | null) => void;
   onDelete: () => void;
 }
 
 // rjsf/ajv reject unknown keywords such as our "x-secret"; strip them and
 // return the paths of secret fields so the UI can hint at vault references.
-function prepareSchema(schema: JsonSchema): { schema: JsonSchema; secrets: string[] } {
+function prepareSchema(schema: JsonSchema): {
+  schema: JsonSchema; secrets: string[]; jsonFields: string[]; policyFields: string[]; textareas: string[];
+} {
   const secrets: string[] = [];
+  const jsonFields: string[] = [];
+  const policyFields: string[] = [];
+  const textareas: string[] = [];
   const walk = (s: any, path: string[]): any => {
     if (Array.isArray(s)) return s.map((x) => walk(x, path));
     if (!s || typeof s !== "object") return s;
@@ -27,15 +40,29 @@ function prepareSchema(schema: JsonSchema): { schema: JsonSchema; secrets: strin
     for (const [k, v] of Object.entries(s)) {
       if (k.startsWith("x-")) {
         if (k === "x-secret" && v) secrets.push(path.join("."));
+        if (k === "x-widget" && v === "textarea") textareas.push(path.join("."));
         continue;
       }
       out[k] = k === "properties"
-        ? Object.fromEntries(Object.entries(v as object).map(([pk, pv]) => [pk, titled(walk(pv, [...path, pk]), pk)]))
+        ? Object.fromEntries(Object.entries(v as object).map(([pk, pv]) => [
+            pk,
+            // JSON-edited fields keep their inner schema as-is: its keys are the JSON keys users type.
+            (pv as any)?.["x-editor"] === "json" || (pv as any)?.["x-editor"] === "policy"
+              ? ((((pv as any)["x-editor"] === "json" ? jsonFields : policyFields)).push([...path, pk].join(".")),
+                 titled(stripX(pv), pk))
+              : titled(walk(pv, [...path, pk]), pk),
+          ]))
         : walk(v, path);
     }
     return out;
   };
-  return { schema: walk(schema, []), secrets };
+  return { schema: walk(schema, []), secrets, jsonFields, policyFields, textareas };
+}
+
+function stripX(s: any): any {
+  if (Array.isArray(s)) return s.map(stripX);
+  if (!s || typeof s !== "object") return s;
+  return Object.fromEntries(Object.entries(s).filter(([k]) => !k.startsWith("x-")).map(([k, v]) => [k, stripX(v)]));
 }
 
 const ACRONYMS: Record<string, string> = { url: "URL", id: "ID", ms: "(ms)", llm: "LLM", aws: "AWS", api: "API" };
@@ -48,16 +75,7 @@ function titled(schema: any, key: string) {
   return { ...schema, title: title.charAt(0).toUpperCase() + title.slice(1) };
 }
 
-// Condition rule values are any JSON value; the form edits them as text.
-const toText = (v: unknown) => (v === undefined ? undefined : typeof v === "string" ? v : JSON.stringify(v));
-const fromText = (v: unknown) => {
-  if (typeof v !== "string") return v;
-  try {
-    return JSON.parse(v);
-  } catch {
-    return v;
-  }
-};
+const FIELDS = { json: JsonTextField, policy: PolicyField };
 
 // Drop top-level keys that the user never set and that equal the schema default.
 function withoutDefaults(cfg: Record<string, any>, schema: JsonSchema, original: Record<string, unknown>) {
@@ -80,12 +98,8 @@ function stable(v: unknown): string {
   );
 }
 
-export function Inspector({ node, nodeType, allNodes, catalog, issues, onChange, onDelete }: Props) {
+export function Inspector({ node, nodeType, issues, upstream, fields, defaultRules, phase, onChange, onDelete }: Props) {
   const isCondition = node.data.nodeType === "condition";
-  const detectorIds = useMemo(
-    () => allNodes.filter((n) => catalog[n.data.nodeType]?.kind === "custom").map((n) => n.id),
-    [allNodes, catalog],
-  );
 
   const { schema, uiSchema } = useMemo(() => {
     const prepared = prepareSchema(nodeType.config_schema);
@@ -97,37 +111,21 @@ export function Inspector({ node, nodeType, allNodes, catalog, issues, onChange,
         "ui:help": "Use a Kong vault reference as the whole value; the secret itself lives in the data plane.",
       };
     }
+    for (const p of prepared.jsonFields) ui[p] = { "ui:field": "json" };
+    for (const p of prepared.policyFields) ui[p] = { "ui:field": "policy" };
+    for (const p of prepared.textareas) ui[p] = { "ui:widget": "textarea", "ui:options": { rows: 3 } };
     for (const key of ["message", "block_message"]) {
       if (s.properties?.[key]) ui[key] = { "ui:widget": "textarea", "ui:options": { rows: 2 } };
     }
-    if (isCondition && s.properties?.rules?.items?.properties) {
-      s.properties.rules.title = "Rules";
-      s.properties.rules.items.title = "Rule";
-      const rp = s.properties.rules.items.properties;
-      if (detectorIds.length) rp.node = { ...rp.node, enum: detectorIds };
-      rp.field = { ...rp.field, default: "detected" };
-      rp.value = { type: "string", title: "Value", description: 'JSON: true, 0.8, "text"' };
-    }
     return { schema: s as RJSFSchema, uiSchema: ui };
-  }, [nodeType, isCondition, detectorIds]);
-
-  const formData = useMemo(() => {
-    const cfg = { ...node.data.config } as Record<string, any>;
-    if (isCondition && Array.isArray(cfg.rules)) {
-      cfg.rules = cfg.rules.map((r: any) => ({ ...r, value: toText(r.value) }));
-    }
-    return cfg;
-  }, [node.data.config, isCondition]);
+  }, [nodeType]);
 
   const handle = (data: Record<string, any>) => {
-    const cfg = { ...data };
-    if (isCondition && Array.isArray(cfg.rules)) {
-      cfg.rules = cfg.rules.map((r: any) => ({ ...r, value: fromText(r.value) }));
-    }
     // rjsf emits the schema defaults as soon as a form mounts. Ignore changes
     // that only add defaults, so selecting a node doesn't mark the pipeline dirty.
-    if (stable(withoutDefaults(cfg, schema, node.data.config)) === stable(node.data.config)) return;
-    onChange(withoutDefaults(cfg, schema, node.data.config), node.data.label ?? null);
+    const cfg = withoutDefaults(data, schema, node.data.config);
+    if (stable(cfg) === stable(node.data.config)) return;
+    onChange(cfg, node.data.label ?? null);
   };
 
   const removable = nodeType.kind !== "endpoint";
@@ -158,13 +156,22 @@ export function Inspector({ node, nodeType, allNodes, catalog, issues, onChange,
           ))}
         </ul>
       )}
-      {Object.keys(schema.properties ?? {}).length > 0 ? (
+      {isCondition ? (
+        <ConditionEditor
+          config={node.data.config as any}
+          upstream={upstream}
+          fields={fields}
+          defaultRules={defaultRules}
+          onChange={(cfg) => onChange(cfg, node.data.label ?? null)}
+        />
+      ) : Object.keys(schema.properties ?? {}).length > 0 ? (
         <Form
           key={node.id}
           schema={schema}
           uiSchema={uiSchema}
-          formData={formData}
+          formData={node.data.config}
           validator={validator}
+          fields={FIELDS}
           liveValidate
           showErrorList={false}
           onChange={(e) => handle(e.formData)}
@@ -172,6 +179,7 @@ export function Inspector({ node, nodeType, allNodes, catalog, issues, onChange,
       ) : (
         <p className="muted">No settings.</p>
       )}
+      {node.data.nodeType === "llamaguard_safety" && <PromptPreview config={node.data.config} phase={phase} />}
       {removable && (
         <button className="btn danger block" onClick={onDelete}>Delete node</button>
       )}

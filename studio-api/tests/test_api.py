@@ -114,3 +114,24 @@ def test_validate_rejects_uninstalled_detector(env, jp_support_dict):
     r = env[0].post("/v1/validate", json=jp_support_dict).json()
     assert r["ok"] is False
     assert any(i["node"] == "laya" and "missing Python module(s) laya" in i["message"] for i in r["issues"])
+
+
+def test_validate_returns_condition_editor_fields(env, jp_support_dict):
+    jp_support_dict["nodes"].append({"id": "triage", "type": "laya_classify"})
+    jp_support_dict["edges"] = [e for e in jp_support_dict["edges"] if e["source"] != "sentiment"] + [
+        {"source": "sentiment", "target": "triage"}, {"source": "triage", "target": "is_kasuhara"}]
+    # The mocked engine reports laya as not installed; the fields are still returned.
+    r = env[0].post("/v1/validate", json=jp_support_dict).json()
+    intent = next(f for f in r["fields"]["triage"] if f["field"] == "flags.intent")
+    assert intent["type"] == "enum" and intent["values"][0]["value"] == "question"
+    assert r["default_rules"]["triage"]["field"] == "flags.intent"
+    assert any(f["field"] == "flags.kasuhara" for f in r["fields"]["sentiment"])
+    assert "prompt_guard" not in r["fields"]
+
+
+def test_llamaguard_prompt_preview(env):
+    r = env[0].post("/v1/preview/llamaguard", json={
+        "phase": "response", "text": "hello",
+        "config": {"policy": [{"id": "leaks", "name": "Internal Leaks", "description": "project codenames"}]}}).json()
+    assert "S15: Internal Leaks.\nproject codenames" in r["prompt"] and "Agent: hello" in r["prompt"]
+    assert r["codes"] == {"S15": "leaks"}
