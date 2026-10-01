@@ -37,7 +37,13 @@ export function toFlowEdge(e: GraphEdge): Edge {
   };
 }
 
-export function fromFlow(slug: string, name: string, nodes: GuardNode[], edges: Edge[]): PipelineGraph {
+export function fromFlow(
+  slug: string,
+  name: string,
+  nodes: GuardNode[],
+  edges: Edge[],
+  playground: PipelineGraph["playground"] = [],
+): PipelineGraph {
   return {
     slug,
     name,
@@ -53,6 +59,7 @@ export function fromFlow(slug: string, name: string, nodes: GuardNode[], edges: 
       target: e.target,
       sourceHandle: e.sourceHandle ?? null,
     })),
+    playground: playground ?? [],
   };
 }
 
@@ -110,6 +117,7 @@ export function newPipeline(slug: string, name: string): PipelineGraph {
       { source: "in", target: "llm" },
       { source: "llm", target: "out" },
     ],
+    playground: [],
   };
 }
 

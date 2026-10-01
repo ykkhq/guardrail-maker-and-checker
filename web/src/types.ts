@@ -35,11 +35,18 @@ export interface GraphEdge {
   sourceHandle?: string | null;
 }
 
+export interface PlaygroundSample {
+  label: string;
+  text: string;
+}
+
 export interface PipelineGraph {
   slug: string;
   name: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
+  /** Playground example prompts for this pipeline (UI-only). */
+  playground?: PlaygroundSample[];
 }
 
 export interface Issue {
@@ -84,7 +91,9 @@ export interface PlaygroundResult {
 }
 
 export interface Status {
-  konnect: { ok: boolean; region: string; control_plane: string; control_plane_id: string | null; error?: string | null };
+  deploy_target?: "konnect" | "gateway";
+  konnect?: { ok: boolean; region: string; control_plane: string; control_plane_id: string | null; error?: string | null };
+  gateway?: { ok: boolean; admin_url: string; workspace?: string; error?: string | null };
   engine: { ok: boolean; url: string };
   kong: { ok: boolean; url: string };
 }

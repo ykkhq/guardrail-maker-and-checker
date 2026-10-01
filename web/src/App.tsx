@@ -12,7 +12,7 @@ import { DRAG_TYPE, Palette } from "./components/Palette";
 import { Playground } from "./components/Playground";
 import { ConfigPanel, IssuesPanel } from "./components/SidePanels";
 import type {
-  Issue, NodeType, PipelineGraph, PipelineSummary, PlaygroundResult, SegmentResponse, Status, ValidateResult,
+  Issue, NodeType, PipelineGraph, PipelineSummary, PlaygroundResult, PlaygroundSample, SegmentResponse, Status, ValidateResult,
 } from "./types";
 
 const nodeTypes = { guard: GuardNodeView };
@@ -27,6 +27,7 @@ export default function App() {
   const [name, setName] = useState("");
   const [nodes, setNodes, onNodesChange] = useNodesState<GuardNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const [playground, setPlayground] = useState<PlaygroundSample[]>([]);
   const [saved, setSaved] = useState("");
   const [issues, setIssues] = useState<Issue[]>([]);
   // For the condition editor: result fields and a suggested rule per detector node.
@@ -61,8 +62,8 @@ export default function App() {
   }, []);
 
   const graph: PipelineGraph | null = useMemo(
-    () => (slug ? fromFlow(slug, name, nodes, edges) : null),
-    [slug, name, nodes, edges],
+    () => (slug ? fromFlow(slug, name, nodes, edges, playground) : null),
+    [slug, name, nodes, edges, playground],
   );
   const graphJson = useMemo(() => (graph ? JSON.stringify(graph) : ""), [graph]);
   const dirty = !!graph && graphJson !== saved;
@@ -73,17 +74,19 @@ export default function App() {
   const load = useCallback(
     (g: PipelineGraph) => {
       const flow = toFlow(g);
+      const samples = g.playground ?? [];
       setSlug(g.slug);
       setName(g.name);
       setNodes(flow.nodes);
       setEdges(flow.edges);
-      setSaved(JSON.stringify(fromFlow(g.slug, g.name, flow.nodes, flow.edges)));
+      setPlayground(samples);
+      setSaved(JSON.stringify(fromFlow(g.slug, g.name, flow.nodes, flow.edges, samples)));
       setSelected(null);
       setResult(null);
       setVersions(null);
       setFitPending(true);
     },
-    [setNodes, setEdges, fitView],
+    [setNodes, setEdges],
   );
 
   const refreshList = useCallback(() => api.list().then(setPipelines), []);
@@ -287,7 +290,12 @@ export default function App() {
       if (r.ok) {
         setSaved(graphJson);
         await refreshList();
-        notify({ kind: "ok", text: `Deployed v${r.version} to Konnect → ${r.endpoint} (model: ${r.model})` });
+        notify({
+          kind: "ok",
+          text: status?.deploy_target === "gateway"
+            ? `Deployed v${r.version} to Gateway [${status.gateway?.workspace ?? "…"}] → ${r.endpoint} (model: ${r.model})`
+            : `Deployed v${r.version} to Konnect → ${r.endpoint} (model: ${r.model})`,
+        });
         if (r.warnings?.length) setTab("config");
       } else {
         setIssues(r.issues ?? issues);
@@ -313,15 +321,42 @@ export default function App() {
   };
 
   const removePipeline = async () => {
-    if (!slug || !window.confirm(`Delete '${slug}'? Deployed Kong entities are removed from Konnect too.`)) return;
+    if (!slug) return;
+    const target = status?.deploy_target === "gateway" ? "Kong Gateway" : "Konnect";
+    const ws = status?.gateway?.workspace ? ` (workspace: ${status.gateway.workspace})` : "";
+    if (!window.confirm(`Delete '${slug}'? Deployed entities are removed from ${target}${ws} too.`)) return;
     setBusy(true);
     try {
-      await api.remove(slug);
+      const r = await api.remove(slug);
+      if (r.error || r.ok === false) {
+        notify({ kind: "error", text: r.error ?? "Delete failed while undeploying from Kong." });
+        return;
+      }
+      const gone = slug;
       setSlug(null);
       setNodes([]);
       setEdges([]);
+      setPlayground([]);
       await refreshList();
-      notify({ kind: "ok", text: `Deleted ${slug}.` });
+      const n = r.removed?.length ?? 0;
+      notify({ kind: "ok", text: n ? `Deleted ${gone} and removed ${n} Kong entit${n === 1 ? "y" : "ies"}.` : `Deleted ${gone}.` });
+    } catch (e: any) {
+      notify({ kind: "error", text: e.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setWorkspace = async () => {
+    if (status?.deploy_target !== "gateway") return;
+    const cur = status.gateway?.workspace ?? "guardrail";
+    const next = window.prompt("Kong workspace for Deploy / Delete:", cur);
+    if (next == null || next.trim() === cur) return;
+    setBusy(true);
+    try {
+      const r = await api.putSettings({ kong_workspace: next.trim() });
+      await api.status().then(setStatus);
+      notify({ kind: "ok", text: `Workspace set to ${r.kong_workspace}. Redeploy pipelines into this workspace.` });
     } catch (e: any) {
       notify({ kind: "error", text: e.message });
     } finally {
@@ -394,7 +429,7 @@ export default function App() {
             <span className="muted">not deployed</span>
           )}
           <div className="spacer" />
-          <StatusDots status={status} />
+          <StatusDots status={status} onWorkspaceClick={setWorkspace} />
           <button className="btn" disabled={!dirty || busy} onClick={save}>{dirty ? "Save" : "Saved"}</button>
           <div className="versions-wrap">
             <button className="btn" disabled={!slug || !current?.version} onClick={openVersions}>Versions</button>
@@ -411,8 +446,8 @@ export default function App() {
               </div>
             )}
           </div>
-          <button className="btn primary" disabled={!slug || busy || errorCount > 0 || !status?.konnect.ok} onClick={deploy}
-                  title={status?.konnect.ok ? "Save, compile and push to Konnect" : `Konnect not reachable${status?.konnect.error ? ": " + status.konnect.error : ""}`}>
+          <button className="btn primary" disabled={!slug || busy || errorCount > 0 || !deployReady(status)} onClick={deploy}
+                  title={deployTitle(status)}>
             {busy ? "Working…" : "Deploy"}
           </button>
           <button className="btn ghost sm danger-text" disabled={!slug || busy} onClick={removePipeline} title="Delete pipeline">
@@ -484,6 +519,8 @@ export default function App() {
               {tab === "config" && <ConfigPanel config={compiled?.ok ? compiled : null} />}
               {tab === "playground" && (
                 <Playground
+                  key={slug ?? ""}
+                  samples={playground}
                   deployed={!!current?.version}
                   dirty={dirty}
                   running={running}
@@ -501,17 +538,75 @@ export default function App() {
   );
 }
 
-function StatusDots({ status }: { status: Status | null }) {
-  const items: [string, boolean | undefined, string][] = [
-    ["Konnect", status?.konnect.ok,
-      status ? `${status.konnect.control_plane} (${status.konnect.region})${status.konnect.error ? ": " + status.konnect.error : ""}` : "studio-api unreachable"],
-    ["Kong", status?.kong.ok, status?.kong.url ?? ""],
-    ["Engine", status?.engine.ok, status?.engine.url ?? ""],
-  ];
+function deployReady(status: Status | null): boolean {
+  if (!status) return false;
+  if (status.deploy_target === "gateway") return !!status.gateway?.ok;
+  return !!status.konnect?.ok;
+}
+
+function deployTitle(status: Status | null): string {
+  if (!status) return "studio-api unreachable";
+  if (status.deploy_target === "gateway") {
+    return status.gateway?.ok
+      ? "Save, compile and push to Kong Gateway Admin"
+      : `Kong Admin not reachable${status.gateway?.error ? ": " + status.gateway.error : ""}`;
+  }
+  return status.konnect?.ok
+    ? "Save, compile and push to Konnect"
+    : `Konnect not reachable${status.konnect?.error ? ": " + status.konnect.error : ""}`;
+}
+
+function StatusDots({
+  status,
+  onWorkspaceClick,
+}: {
+  status: Status | null;
+  onWorkspaceClick?: () => void;
+}) {
+  const target = status?.deploy_target === "gateway" ? "gateway" : "konnect";
+  const items: [string, boolean | undefined, string, (() => void) | undefined][] = [];
+  if (target === "gateway") {
+    items.push([
+      "Gateway",
+      status?.gateway?.ok,
+      status
+        ? `${status.gateway?.admin_url ?? ""}${status.gateway?.error ? ": " + status.gateway.error : ""}`
+        : "studio-api unreachable",
+      undefined,
+    ]);
+    const ws = status?.gateway?.workspace ?? "—";
+    items.push([
+      `ws:${ws}`,
+      status?.gateway?.ok,
+      `Kong workspace: ${ws} (click to change)`,
+      onWorkspaceClick,
+    ]);
+  } else {
+    items.push([
+      "Konnect",
+      status?.konnect?.ok,
+      status
+        ? `${status.konnect?.control_plane ?? ""} (${status.konnect?.region ?? ""})${status.konnect?.error ? ": " + status.konnect.error : ""}`
+        : "studio-api unreachable",
+      undefined,
+    ]);
+  }
+  items.push(
+    ["Kong", status?.kong?.ok, status?.kong?.url ?? "", undefined],
+    ["Engine", status?.engine?.ok, status?.engine?.url ?? "", undefined],
+  );
   return (
     <div className="status">
-      {items.map(([label, ok, title]) => (
-        <span key={label} className={`sdot ${ok ? "up" : "down"}`} title={title}>{label}</span>
+      {items.map(([label, ok, title, onClick]) => (
+        <span
+          key={label}
+          className={`sdot ${ok ? "up" : "down"}${onClick ? " clickable" : ""}`}
+          title={title}
+          onClick={onClick}
+          role={onClick ? "button" : undefined}
+        >
+          {label}
+        </span>
       ))}
     </div>
   );

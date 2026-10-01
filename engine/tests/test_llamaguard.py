@@ -81,3 +81,33 @@ def test_detector_sends_raw_prompt_for_the_phase(monkeypatch):
     assert sent["url"] == "http://o/api/generate" and sent["raw"] is True
     assert "Agent: Try BrandX instead" in sent["prompt"]
     assert r.flags["categories"] == ["competitors"]
+
+
+def test_detector_openai_completions_backend(monkeypatch):
+    sent = {}
+
+    class Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def read(self): return json.dumps({"choices": [{"text": "unsafe\nS15"}]}).encode()
+
+    def fake_urlopen(req, timeout):
+        sent.update(json.loads(req.data), url=req.full_url)
+        return Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    r = LlamaGuardSafety().detect(
+        "Try BrandX instead",
+        {
+            "policy": CUSTOM,
+            "backend": "openai_completions",
+            "base_url": "http://lms",
+            "model": "llama-guard-3-8b-imat",
+            "_phase": "response",
+        },
+    )
+    assert sent["url"] == "http://lms/v1/completions"
+    assert sent["model"] == "llama-guard-3-8b-imat" and sent["temperature"] == 0
+    assert "Agent: Try BrandX instead" in sent["prompt"]
+    assert "raw" not in sent
+    assert r.flags["categories"] == ["competitors"]
