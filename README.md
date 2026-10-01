@@ -6,6 +6,8 @@ Status: all parts from the plan are working: the **engine**, the **compiler**, *
 
 ## Web UI
 
+![WEB UI Screenshot](./images/guardrail_service.png)
+
 Open **http://localhost:13000** once the stack is running.
 
 - **Canvas:** drag guardrails from the palette and connect `Prompt In → … → LLM → Response Out`. Condition nodes have `true`/`false` outputs. Node color shows where each step runs: indigo is an AI Gateway policy (a native Kong AI plugin), teal is the guardrail engine (via DataKit), and orange is control.
