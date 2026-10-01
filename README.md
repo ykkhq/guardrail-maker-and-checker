@@ -57,6 +57,14 @@ Always (re)start containers with `scripts/up.sh [service…]`, not plain `docker
 
 The OpenAI key is passed to `kong-dp` as the environment variable `OPENAI_AUTH_HEADER` (`Bearer <key>`), which `{vault://env/OPENAI_AUTH_HEADER}` in the pipeline's model provider references. The DP certificate and key are passed the same way, as `KONG_CLUSTER_CERT` and `KONG_CLUSTER_CERT_KEY`. None of these are written to disk, but `docker inspect` shows them.
 
+Tear the setup down with `scripts/cleanup.sh`:
+
+```bash
+scripts/cleanup.sh                  # containers, volumes, built images, kong/certs/, kong/konnect.env
+scripts/cleanup.sh --keep-volumes   # same, but keep the model cache and saved pipelines
+scripts/cleanup.sh --konnect        # also delete the AI Gateway in Konnect (asks first; -y skips)
+```
+
 ## Layout
 
 | Path | What it is |
