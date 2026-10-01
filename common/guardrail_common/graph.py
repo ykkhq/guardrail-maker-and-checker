@@ -32,6 +32,15 @@ class Edge(BaseModel):
     source_handle: str | None = Field(default=None, alias="sourceHandle")
 
 
+class PlaygroundSample(BaseModel):
+    """A one-click example prompt shown in the Studio Playground."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    label: str
+    text: str
+
+
 class PipelineGraph(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
@@ -39,6 +48,8 @@ class PipelineGraph(BaseModel):
     name: str = ""
     nodes: list[Node]
     edges: list[Edge] = Field(default_factory=list)
+    # Playground example prompts for this pipeline (UI-only; not sent to Kong).
+    playground: list[PlaygroundSample] = Field(default_factory=list)
 
     def node(self, node_id: str) -> Node:
         for n in self.nodes:

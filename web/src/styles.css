@@ -56,6 +56,7 @@ code, .mono, pre, textarea.json-text { font-family: "JetBrains Mono", ui-monospa
 .sdot::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #cbd0d8; }
 .sdot.up::before { background: var(--o-pass); }
 .sdot.down::before { background: var(--o-block); }
+.sdot.clickable { cursor: pointer; text-decoration: underline dotted; }
 
 .btn {
   height: 32px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--line-strong);

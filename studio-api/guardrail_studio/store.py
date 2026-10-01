@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS versions (
   deployed_at REAL NOT NULL,
   PRIMARY KEY (slug, version)
 );
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 """
 
 
@@ -83,3 +87,14 @@ class Store:
             "SELECT graph FROM versions WHERE slug = ? AND version = ?", (slug, version)
         ).fetchone()
         return PipelineGraph.model_validate_json(row["graph"]) if row else None
+
+    def get_meta(self, key: str) -> str | None:
+        row = self._db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )

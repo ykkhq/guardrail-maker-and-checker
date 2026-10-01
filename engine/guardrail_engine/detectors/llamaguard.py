@@ -11,12 +11,11 @@ from guardrail_engine.models import DetectorResult
 
 
 class LlamaGuardSafety(Detector):
-    """Llama Guard 3 on Ollama (ported from CPUHybridGuardrail.check_safety_ollama).
+    """Llama Guard 3 via Ollama raw generate, or OpenAI-compatible /v1/completions.
 
     The prompt (task instruction + safety policy) is built from node config
-    and sent in Ollama's raw mode, bypassing the model's fixed template. Errors
-    raise, and the executor applies the node's fail_mode (the prototype always
-    failed open).
+    and sent as a full string so the model template is not applied twice.
+    Errors raise, and the executor applies the node's fail_mode.
     """
 
     type = "llamaguard_safety"
@@ -26,20 +25,35 @@ class LlamaGuardSafety(Detector):
         self.timeout_s = timeout_s
 
     def load(self) -> None:
-        """Warm the default model in Ollama so the first request is not a cold start."""
+        """Warm the default model so the first request is not a cold start."""
         from guardrail_common.catalog import with_defaults
 
         self.detect("hello", with_defaults(self.type, {}))
 
     def detect(self, text: str, config: dict[str, Any]) -> DetectorResult:
-        host = (config.get("ollama_host") or os.environ.get("OLLAMA_HOST", "http://localhost:11434")).rstrip("/")
+        backend = (
+            config.get("backend")
+            or os.environ.get("LLAMAGUARD_BACKEND", "ollama")
+        ).strip()
+        prompt = build_prompt(text, config, config.get("_phase", "request"))
+        model = config.get("model") or os.environ.get("LLAMAGUARD_MODEL") or "llama-guard3:1b"
+        if backend == "openai_completions":
+            output = self._openai_completions(prompt, model, config)
+        else:
+            output = self._ollama_generate(prompt, model, config)
+        return parse_output(output, config.get("policy"))
+
+    def _ollama_generate(self, prompt: str, model: str, config: dict[str, Any]) -> str:
+        host = (
+            config.get("ollama_host")
+            or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+        ).rstrip("/")
         payload = {
-            "model": config.get("model", "llama-guard3:1b"),
-            "prompt": build_prompt(text, config, config.get("_phase", "request")),
+            "model": model,
+            "prompt": prompt,
             "raw": True,
             "stream": False,
             "options": {"temperature": 0},
-            # Keep the model loaded between requests (Ollama unloads after 5 min by default).
             "keep_alive": os.environ.get("OLLAMA_KEEP_ALIVE", "30m"),
         }
         req = urllib.request.Request(
@@ -48,8 +62,34 @@ class LlamaGuardSafety(Detector):
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-            output = json.load(resp)["response"].strip()
-        return parse_output(output, config.get("policy"))
+            return json.load(resp)["response"].strip()
+
+    def _openai_completions(self, prompt: str, model: str, config: dict[str, Any]) -> str:
+        # LM Studio / OpenAI-compatible: same full prompt as Ollama raw.
+        base = (
+            config.get("base_url")
+            or os.environ.get("LLAMAGUARD_BASE_URL", "http://localhost:1234")
+        ).rstrip("/")
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "temperature": 0,
+            "max_tokens": 128,
+            "stream": False,
+        }
+        headers = {"Content-Type": "application/json"}
+        if key := (config.get("api_key") or os.environ.get("LLAMAGUARD_API_KEY", "")).strip():
+            headers["Authorization"] = f"Bearer {key}"
+        req = urllib.request.Request(
+            f"{base}/v1/completions",
+            data=json.dumps(payload).encode(),
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+            data = json.load(resp)
+        choice = (data.get("choices") or [{}])[0]
+        text = choice.get("text") or choice.get("message", {}).get("content") or ""
+        return text.strip()
 
 
 def parse_output(output: str, policy: list[dict[str, Any]] | None = None) -> DetectorResult:

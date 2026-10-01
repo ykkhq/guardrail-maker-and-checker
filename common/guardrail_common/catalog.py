@@ -245,7 +245,8 @@ _TYPES: list[NodeType] = [
         label="Llama Guard Safety",
         category="Safety",
         kind="custom",
-        description="Jailbreak and unsafe-content check with Llama Guard 3 on Ollama, against your own "
+        description="Jailbreak and unsafe-content check with Llama Guard 3 (Ollama raw or "
+                    "OpenAI-compatible /v1/completions, e.g. LM Studio), against your own "
                     "safety policy (unsafe content categories) and task instruction.",
         phases=(REQUEST, RESPONSE),
         config_schema=_obj(
@@ -265,8 +266,8 @@ _TYPES: list[NodeType] = [
                     "description": "Unsafe content categories. Standard ones keep their codes S1–S14; custom ones "
                                    "get S15+. A disabled category is ignored in Llama Guard's answer (it is still "
                                    "shown to the model, which keeps its judgement consistent). Custom categories "
-                                   "need a model that follows the prompt (llama-guard3:8b); the 1B model only knows "
-                                   "S1–S13.",
+                                   "need a model that follows the prompt (llama-guard3:8b / LM Studio 8B); the 1B "
+                                   "model only knows S1–S13.",
                     "x-editor": "policy",
                     "minItems": 1,
                     "maxItems": 40,
@@ -283,8 +284,19 @@ _TYPES: list[NodeType] = [
                     },
                     "default": llamaguard.DEFAULT_POLICY,
                 },
+                "backend": {
+                    "type": "string",
+                    "enum": ["ollama", "openai_completions"],
+                    "default": "ollama",
+                    "description": "ollama: POST /api/generate with raw=true. "
+                                   "openai_completions: POST /v1/completions (LM Studio).",
+                },
                 "model": {"type": "string", "default": "llama-guard3:1b"},
                 "ollama_host": {"type": "string", "description": "Leave empty to use the engine's OLLAMA_HOST."},
+                "base_url": {
+                    "type": "string",
+                    "description": "openai_completions base URL (no /v1). Leave empty for LLAMAGUARD_BASE_URL.",
+                },
             }
             | _DETECTOR_COMMON
         ),

@@ -83,6 +83,45 @@ def test_llm_provider_mapping():
     assert c.stages == []
 
 
+def test_to_gateway_entities_maps_proxy_and_policies(graph_of):
+    from guardrail_studio.compiler.gateway import to_gateway_entities
+
+    c = compile_pipeline(graph_of())
+    deck = to_gateway_entities(c)
+    svc = deck["services"][0]
+    assert svc["name"] == "gs-jp-support"
+    assert svc["routes"][0]["paths"] == ["/pipelines/jp-support/chat/completions"]
+    assert svc["routes"][0]["strip_path"] is False
+    names = [p["name"] for p in svc["plugins"]]
+    assert names[0] == "ai-proxy-advanced"
+    assert "ai-prompt-guard" in names and "datakit" in names
+    proxy = svc["plugins"][0]
+    assert proxy["config"]["targets"][0]["model"]["provider"] == "openai"
+    assert proxy["config"]["targets"][0]["model"]["name"] == "gpt-4o-mini"
+    assert proxy["config"]["targets"][0]["auth"]["header_value"] == "{vault://env/OPENAI_AUTH_HEADER}"
+    dk = next(p for p in svc["plugins"] if p["name"] == "datakit")
+    assert dk["instance_name"] == "gs-jp-support-datakit"
+    assert any(n["type"] == "call" for n in dk["config"]["nodes"])
+
+
+def test_to_gateway_entities_lm_studio_upstream():
+    from guardrail_studio.compiler.gateway import to_gateway_entities
+
+    g = PipelineGraph.model_validate({
+        "slug": "lms", "nodes": [
+            {"id": "in", "type": "prompt_in"},
+            {"id": "llm", "type": "llm", "config": {
+                "provider": "openai", "model": "local-chat",
+                "upstream_url": "http://host.docker.internal:1234/v1/chat/completions",
+                "auth_header_value": "Bearer lm-studio",
+            }},
+        ], "edges": [{"source": "in", "target": "llm"}]})
+    proxy = to_gateway_entities(compile_pipeline(g))["services"][0]["plugins"][0]
+    t = proxy["config"]["targets"][0]
+    assert t["model"]["options"]["upstream_url"].endswith("/v1/chat/completions")
+    assert t["auth"]["header_value"] == "Bearer lm-studio"
+
+
 def test_response_phase_segment_shares_datakit(graph_of):
     def mutate(d):
         d["nodes"].append({"id": "resp_kw", "type": "keyword_blocklist", "config": {"keywords": ["社外秘"]}})

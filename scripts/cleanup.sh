@@ -23,7 +23,7 @@ done
 if command -v docker >/dev/null; then
   down=(down --remove-orphans --rmi local)
   (( keep_volumes )) || down+=(-v)
-  docker compose --profile ollama "${down[@]}"
+  docker compose --profile ollama --profile konnect-dp "${down[@]}"
   echo "docker: stack removed$( (( keep_volumes )) && echo ', volumes kept')"
 else
   echo "docker: not installed, skipped"

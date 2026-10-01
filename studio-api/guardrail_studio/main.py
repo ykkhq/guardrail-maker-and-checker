@@ -2,20 +2,22 @@
 
   GET    /v1/catalog                         node types (palette + inspector forms)
   POST   /v1/validate                        issues, plus rule fields per detector for the condition editor
-  POST   /v1/compile                         AI Gateway entities (format=declarative for a kongctl-style file)
+  POST   /v1/compile                         AI Gateway entities (format=declarative|gateway)
   POST   /v1/preview/llamaguard              the Llama Guard prompt for a node config
   GET    /v1/pipelines                       saved pipelines
   GET    /v1/pipelines/{slug}                one pipeline graph
   PUT    /v1/pipelines/{slug}                save a graph (canvas positions included)
-  DELETE /v1/pipelines/{slug}                delete (and undeploy from Konnect)
-  POST   /v1/pipelines/{slug}/deploy         compile, push to Konnect, snapshot a version
+  DELETE /v1/pipelines/{slug}                delete (and undeploy)
+  POST   /v1/pipelines/{slug}/deploy         compile, push, snapshot a version
   GET    /v1/pipelines/{slug}/versions       deployed versions
   POST   /v1/pipelines/{slug}/rollback/{v}   restore a version's graph and redeploy it
   POST   /v1/playground                      run a prompt: live through Kong, or dry-run on the engine
-  GET    /v1/status                          Konnect / data plane / engine reachability
+  GET    /v1/status                          Konnect or Gateway / data plane / engine reachability
 
-Environment: KONNECT_PAT_FILE or KONNECT_PAT, KONNECT_REGION (us), KONNECT_CONTROL_PLANE (the AI Gateway name,
-guardrail-service), GUARDRAIL_ENGINE_URL (URL Kong uses to reach the engine),
+Environment: GUARDRAIL_DEPLOY_TARGET (konnect|gateway, default konnect),
+KONNECT_PAT_FILE or KONNECT_PAT, KONNECT_REGION, KONNECT_CONTROL_PLANE,
+KONG_ADMIN_URL, KONG_ADMIN_TOKEN, KONG_WORKSPACE (gateway mode; default guardrail),
+GUARDRAIL_ENGINE_URL (URL Kong uses to reach the engine),
 ENGINE_URL (URL studio-api uses; defaults to GUARDRAIL_ENGINE_URL), KONG_PROXY_URL, KONG_PUBLIC_URL,
 STUDIO_DB, STUDIO_SAMPLES_DIR, STUDIO_CORS_ORIGINS.
 """
@@ -38,6 +40,8 @@ from guardrail_common.catalog import CATALOG
 from guardrail_common.graph import PipelineGraph
 from guardrail_studio.compiler import CompileError, CompileOptions, compile_pipeline, to_declarative, validate
 from guardrail_studio.compiler.compile import CHAT_SUFFIX
+from guardrail_studio.compiler.gateway import to_gateway_entities
+from guardrail_studio.gateway_admin import GatewayAdmin, GatewayError, normalize_workspace
 from guardrail_studio.konnect import Konnect, KonnectError, load_token
 from guardrail_studio.store import Store
 
@@ -46,7 +50,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 class CompileRequest(BaseModel):
     graph: PipelineGraph
-    format: Literal["entities", "declarative"] = "entities"
+    format: Literal["entities", "declarative", "gateway"] = "entities"
 
 
 class PlaygroundRequest(BaseModel):
@@ -63,18 +67,42 @@ class LlamaGuardPreview(BaseModel):
     text: str = "<message>"
 
 
+class SettingsUpdate(BaseModel):
+    kong_workspace: str | None = None
+
+
 class Settings:
     def __init__(self) -> None:
-        self.region = os.environ.get("KONNECT_REGION", "us")
-        self.control_plane = os.environ.get("KONNECT_CONTROL_PLANE", "guardrail-service")
-        self.kong_engine_url = os.environ.get("GUARDRAIL_ENGINE_URL", CompileOptions.engine_url)
-        self.engine_url = os.environ.get("ENGINE_URL", self.kong_engine_url)
-        self.kong_proxy_url = os.environ.get("KONG_PROXY_URL", "http://localhost:18000")
-        # What users call (shown in the UI); differs from the in-network URL in Docker.
-        self.kong_public_url = os.environ.get("KONG_PUBLIC_URL", self.kong_proxy_url)
-        self.db = os.environ.get("STUDIO_DB", str(ROOT / "studio.db"))
-        self.samples = pathlib.Path(os.environ.get("STUDIO_SAMPLES_DIR", str(ROOT / "samples")))
-        self.cors = os.environ.get("STUDIO_CORS_ORIGINS", "http://localhost:5173").split(",")
+        def env(name: str, default: str = "") -> str:
+            return (os.environ.get(name) or "").strip() or default
+
+        self.deploy_target = env("GUARDRAIL_DEPLOY_TARGET", "konnect").lower()
+        gateway = self.deploy_target == "gateway"
+        self.region = env("KONNECT_REGION", "us")
+        self.control_plane = env("KONNECT_CONTROL_PLANE", "guardrail-service")
+        self.kong_admin_url = env("KONG_ADMIN_URL", "http://host.docker.internal:8001")
+        # Local Enterprise docker defaults to kongadmin; Konnect mode does not use this.
+        self.kong_admin_token = env("KONG_ADMIN_TOKEN", "kongadmin" if gateway else "")
+        self.kong_workspace = env("KONG_WORKSPACE", "guardrail" if gateway else "default")
+        self.kong_service_url = env("KONG_SERVICE_URL", "http://mockbin:8080")
+        # DataKit URL must be reachable from the Kong data plane that serves traffic.
+        self.kong_engine_url = env(
+            "GUARDRAIL_ENGINE_URL",
+            "http://host.docker.internal:18080" if gateway else "http://guardrail-engine:8080",
+        )
+        # studio-api → engine (same compose network).
+        self.engine_url = env("ENGINE_URL", "http://guardrail-engine:8080")
+        self.kong_proxy_url = env(
+            "KONG_PROXY_URL",
+            "http://host.docker.internal:8000" if gateway else "http://kong-dp:8000",
+        )
+        self.kong_public_url = env(
+            "KONG_PUBLIC_URL",
+            "http://localhost:8000" if gateway else "http://localhost:18000",
+        )
+        self.db = env("STUDIO_DB", str(ROOT / "studio.db"))
+        self.samples = pathlib.Path(env("STUDIO_SAMPLES_DIR", str(ROOT / "samples")))
+        self.cors = env("STUDIO_CORS_ORIGINS", "http://localhost:5173").split(",")
 
 
 def _issues(exc: CompileError) -> JSONResponse:
@@ -82,7 +110,7 @@ def _issues(exc: CompileError) -> JSONResponse:
 
 
 def create_app(settings: Settings | None = None, konnect_factory=None,
-               http: httpx.Client | None = None) -> FastAPI:
+               gateway_factory=None, http: httpx.Client | None = None) -> FastAPI:
     cfg = settings or Settings()
     store = Store(cfg.db)
     opts = CompileOptions(engine_url=cfg.kong_engine_url)
@@ -97,6 +125,19 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
         except RuntimeError as exc:
             raise HTTPException(503, f"Konnect not configured: {exc}") from exc
 
+    def gateway() -> GatewayAdmin:
+        if gateway_factory:
+            return gateway_factory()
+        try:
+            return GatewayAdmin(
+                cfg.kong_admin_url,
+                token=cfg.kong_admin_token or None,
+                workspace=cfg.kong_workspace,
+                service_url=cfg.kong_service_url,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(503, f"Kong Admin not configured: {exc}") from exc
+
     def cp_id(k: Konnect) -> str:
         if "id" not in cp_cache:
             cp = k.find_control_plane(cfg.control_plane)
@@ -105,10 +146,17 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
             cp_cache["id"] = cp["id"]
         return cp_cache["id"]
 
-    # Seed samples on first start.
-    if not store.list() and cfg.samples.is_dir():
+    # Refresh bundled sample pipelines from samples/*.json on every start.
+    if cfg.samples.is_dir():
         for f in sorted(cfg.samples.glob("*.json")):
             store.save(PipelineGraph.model_validate_json(f.read_text()))
+
+    # Persist workspace override from a previous UI set (survives studio-api restart).
+    if saved_ws := store.get_meta("kong_workspace"):
+        try:
+            cfg.kong_workspace = normalize_workspace(saved_ws)
+        except ValueError:
+            pass
 
     app = FastAPI(title="guardrail-studio-api", version="0.1.0")
     app.add_middleware(CORSMiddleware, allow_origins=cfg.cors, allow_methods=["*"], allow_headers=["*"])
@@ -153,7 +201,6 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
                                "message": f"the guardrail engine cannot run '{n.type}': missing Python "
                                           f"module(s) {', '.join(info['missing'])} (rebuild the engine image with them)"})
         ok = not any(i["level"] == "error" for i in issues)
-        # Condition editor data: what each detector outputs, and a first rule to suggest.
         fields, default_rules = {}, {}
         for n in graph.nodes:
             if CATALOG.get(n.type) and CATALOG[n.type].kind == "custom":
@@ -161,7 +208,7 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
                     fields[n.id] = outputs.result_fields(n.type, n.config)
                     default_rules[n.id] = outputs.default_rule(n.id, n.type, n.config)
                 except (TypeError, AttributeError, KeyError):
-                    fields[n.id] = []  # malformed config: validation already reports it
+                    fields[n.id] = []
         return {"ok": ok, "issues": issues, "phases": a.phase, "fields": fields, "default_rules": default_rules}
 
     @app.post("/v1/compile")
@@ -170,20 +217,21 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
             compiled = compile_pipeline(req.graph, opts)
         except CompileError as exc:
             return _issues(exc)
-        result = (
-            to_declarative(compiled)
-            if req.format == "declarative"
-            else {"provider": compiled.provider, "model": compiled.model, "policies": compiled.policies}
-        )
+        if req.format == "declarative":
+            result = to_declarative(compiled)
+        elif req.format == "gateway":
+            result = to_gateway_entities(compiled, service_url=cfg.kong_service_url)
+        else:
+            result = {"provider": compiled.provider, "model": compiled.model, "policies": compiled.policies}
         return {"ok": True, "result": result, "stages": [s.describe() for s in compiled.stages],
                 "warnings": compiled.warnings}
 
     @app.post("/v1/preview/llamaguard")
     def preview_llamaguard(req: LlamaGuardPreview) -> dict:
         """The exact prompt the engine sends to Llama Guard for this node config."""
-        cfg = catalog.with_defaults("llamaguard_safety", req.config)
-        return {"prompt": llamaguard.build_prompt(req.text, cfg, req.phase),
-                "codes": llamaguard.codes(cfg.get("policy"))}
+        node_cfg = catalog.with_defaults("llamaguard_safety", req.config)
+        return {"prompt": llamaguard.build_prompt(req.text, node_cfg, req.phase),
+                "codes": llamaguard.codes(node_cfg.get("policy"))}
 
     # --- pipelines -------------------------------------------------------------------
 
@@ -207,18 +255,74 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
 
     @app.delete("/v1/pipelines/{slug}")
     def delete_pipeline(slug: str, undeploy: bool = True) -> dict:
+        # Always attempt Kong undeploy by slug (versions may be empty after DB reset).
         removed: list[str] = []
-        if undeploy and store.versions(slug):
-            with konnect() as k:
-                removed = k.undeploy(cp_id(k), slug)
+        if undeploy:
+            if cfg.deploy_target == "gateway":
+                try:
+                    with gateway() as g:
+                        removed = g.undeploy(slug)
+                except GatewayError as exc:
+                    return JSONResponse(
+                        status_code=502,
+                        content={"ok": False, "error": str(exc), "gateway": exc.body, "removed": removed},
+                    )
+            else:
+                try:
+                    with konnect() as k:
+                        removed = k.undeploy(cp_id(k), slug)
+                except KonnectError as exc:
+                    return JSONResponse(
+                        status_code=502,
+                        content={"ok": False, "error": str(exc), "konnect": exc.body, "removed": removed},
+                    )
         store.delete(slug)
         return {"ok": True, "removed": removed}
+
+    @app.get("/v1/settings")
+    def get_settings() -> dict:
+        return {
+            "deploy_target": cfg.deploy_target,
+            "kong_workspace": cfg.kong_workspace if cfg.deploy_target == "gateway" else None,
+        }
+
+    @app.put("/v1/settings")
+    def put_settings(body: SettingsUpdate) -> dict:
+        if body.kong_workspace is not None:
+            if cfg.deploy_target != "gateway":
+                raise HTTPException(400, "kong_workspace only applies when GUARDRAIL_DEPLOY_TARGET=gateway")
+            try:
+                ws = normalize_workspace(body.kong_workspace)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            cfg.kong_workspace = ws
+            store.set_meta("kong_workspace", ws)
+        return {
+            "ok": True,
+            "deploy_target": cfg.deploy_target,
+            "kong_workspace": cfg.kong_workspace if cfg.deploy_target == "gateway" else None,
+        }
 
     def _deploy(graph: PipelineGraph):
         try:
             compiled = compile_pipeline(graph, opts)
         except CompileError as exc:
             return _issues(exc)
+        if cfg.deploy_target == "gateway":
+            try:
+                with gateway() as g:
+                    res = g.deploy(compiled)
+            except GatewayError as exc:
+                return JSONResponse(status_code=502, content={"ok": False, "error": str(exc), "gateway": exc.body})
+            version = store.add_version(graph, {"provider": compiled.provider, "model": compiled.model,
+                                                "policies": compiled.policies,
+                                                "gateway": to_gateway_entities(compiled, service_url=cfg.kong_service_url)})
+            return {"ok": True, "version": version, "warnings": compiled.warnings,
+                    "stages": [s.describe() for s in compiled.stages],
+                    "target": "gateway",
+                    "deployed": {"service_id": res.service_id, "route_id": res.route_id, "plugins": res.plugins,
+                                 "deleted": res.deleted, "workspace": res.workspace},
+                    "endpoint": f"{cfg.kong_public_url}{compiled.endpoint_path}", "model": compiled.model_name}
         try:
             with konnect() as k:
                 res = k.deploy(cp_id(k), compiled)
@@ -228,6 +332,7 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
                                             "policies": compiled.policies})
         return {"ok": True, "version": version, "warnings": compiled.warnings,
                 "stages": [s.describe() for s in compiled.stages],
+                "target": "konnect",
                 "deployed": {"model_id": res.model_id, "provider_id": res.provider_id, "policies": res.policies,
                              "deleted": res.deleted},
                 "endpoint": f"{cfg.kong_public_url}{compiled.endpoint_path}", "model": compiled.model_name}
@@ -266,12 +371,9 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
         graph = req.graph or store.get(req.slug)
         if not graph:
             raise HTTPException(404, f"pipeline '{req.slug}' not found")
-        # The AI Gateway selects the pipeline's model by the body's `model`.
         body = {"model": f"gs-{req.slug}", "messages": req.messages}
         out: dict[str, Any] = {"mode": req.mode}
 
-        # The engine trace (dry run) is always included: it explains which path
-        # the custom nodes took, even for live requests.
         try:
             r = client.post(f"{cfg.engine_url}/v1/dry-run",
                             json={"graph": graph.model_dump(by_alias=True), "body": body})
@@ -302,23 +404,43 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
             except httpx.HTTPError:
                 return False
 
-        konnect_ok, cp, err = False, None, None
-        try:
-            with konnect() as k:
-                cp = cp_id(k)
-                konnect_ok = True
-        except HTTPException as exc:
-            err = exc.detail
-        except KonnectError as exc:
-            err = f"Konnect API returned {exc.status}"
-        except httpx.HTTPError as exc:
-            err = type(exc).__name__
-        return {
-            "konnect": {"ok": konnect_ok, "region": cfg.region, "control_plane": cfg.control_plane,
-                        "control_plane_id": cp, "error": err},
+        out: dict[str, Any] = {
+            "deploy_target": cfg.deploy_target,
             "engine": {"ok": probe(f"{cfg.engine_url}/healthz"), "url": cfg.engine_url},
             "kong": {"ok": probe(f"{cfg.kong_proxy_url}/"), "url": cfg.kong_proxy_url},
         }
+        if cfg.deploy_target == "gateway":
+            admin_ok, err = False, None
+            try:
+                with gateway() as g:
+                    admin_ok = g.ready()
+            except HTTPException as exc:
+                err = exc.detail
+            except GatewayError as exc:
+                err = f"Admin API returned {exc.status}"
+            except httpx.HTTPError as exc:
+                err = type(exc).__name__
+            out["gateway"] = {
+                "ok": admin_ok,
+                "admin_url": cfg.kong_admin_url,
+                "workspace": cfg.kong_workspace,
+                "error": err,
+            }
+        else:
+            konnect_ok, cp, err = False, None, None
+            try:
+                with konnect() as k:
+                    cp = cp_id(k)
+                    konnect_ok = True
+            except HTTPException as exc:
+                err = exc.detail
+            except KonnectError as exc:
+                err = f"Konnect API returned {exc.status}"
+            except httpx.HTTPError as exc:
+                err = type(exc).__name__
+            out["konnect"] = {"ok": konnect_ok, "region": cfg.region, "control_plane": cfg.control_plane,
+                              "control_plane_id": cp, "error": err}
+        return out
 
     return app
 

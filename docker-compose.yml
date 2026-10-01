@@ -1,10 +1,11 @@
-# Start with scripts/up.sh (it passes the OpenAI key from ~/.openai/creds as an
-# environment variable without writing it to disk). Prerequisite:
-#   cd studio-api && KONNECT_PAT_FILE=~/.kong/kpat uv run python -m guardrail_studio.bootstrap
+# Start with scripts/up.sh.
+# Konnect mode (default): bootstrap first, then up.sh (starts kong-dp profile).
+# Gateway mode: GUARDRAIL_DEPLOY_TARGET=gateway (uses kong-enterprise/docker; no local kong-dp).
 name: guardrail-studio
 
 services:
   kong-dp:
+    profiles: ["konnect-dp"]
     image: kong/kong-ai-gateway:2.1
     env_file: kong/konnect.env          # AI Gateway cluster + telemetry endpoints (from bootstrap)
     environment:
@@ -39,10 +40,13 @@ services:
       dockerfile: engine/Dockerfile
     environment:
       GUARDRAIL_PRELOAD: presidio_pii,sentiment_kasuhara,llamaguard_safety,laya_classify
-      PRESIDIO_LANGUAGES: ja
-      # Llama Guard uses the host's Ollama (Metal-accelerated on macOS).
-      # With --profile ollama, set OLLAMA_HOST=http://ollama:11434 instead.
+      PRESIDIO_LANGUAGES: ja,en
+      # Llama Guard: ollama (default) or openai_completions (LM Studio).
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      LLAMAGUARD_BACKEND: ${LLAMAGUARD_BACKEND:-ollama}
+      LLAMAGUARD_BASE_URL: ${LLAMAGUARD_BASE_URL:-http://host.docker.internal:1234}
+      LLAMAGUARD_MODEL: ${LLAMAGUARD_MODEL:-llama-guard3:1b}
+      LLAMAGUARD_API_KEY: ${LLAMAGUARD_API_KEY:-}
     volumes:
       - models:/models   # Hugging Face cache survives rebuilds
     ports:
@@ -58,12 +62,21 @@ services:
       context: .
       dockerfile: studio-api/Dockerfile
     environment:
-      KONNECT_PAT:                     # from scripts/up.sh (~/.kong/kpat)
+      GUARDRAIL_DEPLOY_TARGET: ${GUARDRAIL_DEPLOY_TARGET:-konnect}
+      KONNECT_PAT:                     # from scripts/up.sh (~/.kong/kpat); unused in gateway mode
       KONNECT_REGION: ${KONNECT_REGION:-us}
       KONNECT_CONTROL_PLANE: ${KONNECT_CONTROL_PLANE:-guardrail-service}
-      GUARDRAIL_ENGINE_URL: http://guardrail-engine:8080   # written into DataKit (Kong -> engine)
-      KONG_PROXY_URL: http://kong-dp:8000                  # playground live requests
-      KONG_PUBLIC_URL: http://localhost:18000              # shown in the UI
+      KONG_ADMIN_URL: ${KONG_ADMIN_URL:-http://host.docker.internal:8001}
+      KONG_ADMIN_TOKEN: ${KONG_ADMIN_TOKEN:-kongadmin}
+      KONG_WORKSPACE: ${KONG_WORKSPACE:-guardrail}
+      KONG_SERVICE_URL: ${KONG_SERVICE_URL:-http://mockbin:8080}
+      # Empty → studio-api Settings picks defaults from GUARDRAIL_DEPLOY_TARGET.
+      GUARDRAIL_ENGINE_URL: ${GUARDRAIL_ENGINE_URL:-}
+      ENGINE_URL: ${ENGINE_URL:-http://guardrail-engine:8080}
+      KONG_PROXY_URL: ${KONG_PROXY_URL:-}
+      KONG_PUBLIC_URL: ${KONG_PUBLIC_URL:-}
+      # Chat LLM auth for gateway deploy (Bearer …). From scripts/up.sh / ~/.lmstudio/creds.
+      LM_STUDIO_AUTH_HEADER: ${LM_STUDIO_AUTH_HEADER:-}
       STUDIO_CORS_ORIGINS: http://localhost:13000,http://localhost:5173
     volumes:
       - studio-data:/data

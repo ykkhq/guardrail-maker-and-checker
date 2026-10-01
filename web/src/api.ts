@@ -28,8 +28,11 @@ export const api = {
   list: () => call<{ pipelines: PipelineSummary[] }>("GET", "/pipelines").then((r) => r.pipelines),
   get: (slug: string) => call<PipelineGraph>("GET", `/pipelines/${slug}`),
   save: (g: PipelineGraph) => call<{ ok: boolean }>("PUT", `/pipelines/${g.slug}`, g),
-  remove: (slug: string) => call<{ ok: boolean }>("DELETE", `/pipelines/${slug}`),
+  remove: (slug: string) => call<{ ok: boolean; removed?: string[]; error?: string }>("DELETE", `/pipelines/${slug}`),
   deploy: (g: PipelineGraph) => call<DeployResult>("POST", `/pipelines/${g.slug}/deploy`, g),
+  getSettings: () => call<{ deploy_target: string; kong_workspace: string | null }>("GET", "/settings"),
+  putSettings: (body: { kong_workspace?: string }) =>
+    call<{ ok: boolean; kong_workspace: string | null }>("PUT", "/settings", body),
   versions: (slug: string) =>
     call<{ versions: { version: number; deployed_at: number }[] }>("GET", `/pipelines/${slug}/versions`)
       .then((r) => r.versions),
