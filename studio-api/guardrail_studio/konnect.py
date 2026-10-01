@@ -108,6 +108,18 @@ class Konnect:
             "labels": {"managed-by": "guardrail-studio"},
         })
 
+    def delete_control_plane(self, gw_id: str) -> None:
+        self._req("DELETE", f"{GATEWAYS}/{gw_id}")
+
+    def purge(self, gw_id: str) -> list[str]:
+        """Delete every entity on the AI Gateway: models first, then what they reference."""
+        removed = []
+        for kind in ("models", "policies", "model-providers", "data-plane-certificates"):
+            for e in self._pages(f"{GATEWAYS}/{gw_id}/{kind}"):
+                self._req("DELETE", f"{GATEWAYS}/{gw_id}/{kind}/{e['id']}")
+                removed.append(f"{kind}/{e.get('name') or e.get('title') or e['id']}")
+        return removed
+
     def dp_certificates(self, gw_id: str) -> list[dict[str, Any]]:
         return self._pages(f"{GATEWAYS}/{gw_id}/data-plane-certificates")
 
