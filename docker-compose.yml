@@ -5,13 +5,12 @@ name: guardrail-studio
 
 services:
   kong-dp:
-    image: kong/kong-gateway:3.14
-    env_file: kong/konnect.env          # cluster + telemetry endpoints (from bootstrap)
+    image: kong/kong-ai-gateway:2.1
+    env_file: kong/konnect.env          # AI Gateway cluster + telemetry endpoints (from bootstrap)
     environment:
       KONG_ROLE: data_plane
       KONG_DATABASE: "off"
       KONG_KONNECT_MODE: "on"
-      KONG_VITALS: "off"
       KONG_CLUSTER_MTLS: pki
       # PEM contents from scripts/up.sh (the key file stays 0600 on the host).
       KONG_CLUSTER_CERT:
@@ -21,10 +20,10 @@ services:
       KONG_PROXY_LISTEN: "0.0.0.0:8000"
       KONG_STATUS_LISTEN: "0.0.0.0:8100"
       KONG_NGINX_WORKER_PROCESSES: "2"
-      # Resolved by {vault://env/OPENAI_AUTH_HEADER} in ai-proxy-advanced.
+      # Resolved by {vault://env/OPENAI_AUTH_HEADER} in the pipeline's model provider.
       OPENAI_AUTH_HEADER:
     ports:
-      - "18000:8000"   # proxy: POST http://localhost:18000/pipelines/<slug>
+      - "18000:8000"   # proxy: POST http://localhost:18000/pipelines/<slug>/chat/completions
       - "18100:8100"   # status: /status/ready
     depends_on:
       guardrail-engine:

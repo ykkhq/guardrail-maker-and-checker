@@ -1,9 +1,13 @@
-"""Compiles a validated pipeline graph into Kong entities.
+"""Compiles a validated pipeline graph into Konnect AI Gateway entities.
 
-Stages: every native node becomes its own plugin. The custom/control nodes of a
-phase become one engine segment, run by a single DataKit plugin (Kong allows
-one instance of a plugin per route). Request-phase plugins are ordered with
-dynamic ordering (`ordering.before.access`) to match the canvas.
+A pipeline becomes one model provider, one model and its policies. The model's
+route serves `/pipelines/{slug}/chat/completions` and proxies to the LLM node.
+Clients select it by sending the model name (`gs-{slug}`) as `model` in the body.
+Stages: every native node becomes its own policy (its Kong plugin name is the
+policy type). The custom/control nodes of a phase become one engine segment,
+run by a single DataKit policy. AI Gateway policies have no `ordering` field, so
+they run in Kong plugin priority order (DataKit before the native AI plugins),
+whatever the canvas order.
 """
 
 from __future__ import annotations
@@ -18,6 +22,8 @@ from guardrail_studio.compiler.validate import Analysis, Issue, validate
 
 REQUEST, RESPONSE = catalog.REQUEST, catalog.RESPONSE
 TAG = "guardrail-studio"
+# AI Gateway serves OpenAI-format models at `<route prefix>/chat/completions`.
+CHAT_SUFFIX = "/chat/completions"
 
 
 class CompileError(Exception):
@@ -29,8 +35,6 @@ class CompileError(Exception):
 @dataclass
 class CompileOptions:
     engine_url: str = "http://guardrail-engine:8080"
-    # ai-proxy-advanced sets the real upstream; Kong still needs a service URL.
-    service_url: str = "http://localhost:32000"
     route_prefix: str = "/pipelines"
     datakit_debug: bool = False
     engine_timeout_ms: int = 10000
@@ -55,11 +59,21 @@ class Stage:
 
 @dataclass
 class CompiledPipeline:
-    service: dict[str, Any]
-    route: dict[str, Any]
-    plugins: list[dict[str, Any]]
+    slug: str
+    provider: dict[str, Any]
+    model: dict[str, Any]
+    policies: list[dict[str, Any]]  # in canvas order, as listed on the model
     stages: list[Stage]
     issues: list[Issue] = field(default_factory=list)
+
+    @property
+    def model_name(self) -> str:
+        """The `model` value a client sends to select this pipeline."""
+        return self.model["name"]
+
+    @property
+    def endpoint_path(self) -> str:
+        return self.model["config"]["route"]["paths"][0] + CHAT_SUFFIX
 
     @property
     def warnings(self) -> list[str]:
@@ -96,7 +110,7 @@ def plan_stages(graph: PipelineGraph, a: Analysis) -> list[Stage]:
         if len(groups) > 1:
             split = natives[min(groups)]
             a.error(f"custom guardrails appear both before and after native plugin '{split}' in the {phase} phase; "
-                    "Kong runs one DataKit plugin per route, so keep all custom/control nodes of a phase together",
+                    "a model runs one DataKit policy, so keep all custom/control nodes of a phase together",
                     split)
             continue
 
@@ -120,28 +134,26 @@ def plan_stages(graph: PipelineGraph, a: Analysis) -> list[Stage]:
     return stages
 
 
-def _llm_plugin(cfg: dict[str, Any]) -> dict[str, Any]:
+def _llm_entities(cfg: dict[str, Any], name: str, labels: dict[str, str]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The model provider and the model target for the LLM node."""
     provider = cfg["provider"]
     options: dict[str, Any] = {}
     for k in ("max_tokens", "temperature", "upstream_url"):
         if k in cfg:
             options[k] = cfg[k]
-    if provider == "ollama":
-        # Kong serves Ollama through the llama2 provider in ollama format.
-        provider = "llama2"
-        options["llama2_format"] = "ollama"
-    elif provider == "anthropic":
+    if provider == "anthropic":
         options.setdefault("anthropic_version", "2023-06-01")
         options.setdefault("max_tokens", 1024)
     options.update(cfg.get("options", {}))
 
-    target: dict[str, Any] = {
-        "route_type": cfg["route_type"],
-        "model": {"provider": provider, "name": cfg["model"], "options": options},
-    }
+    # AI Gateway requires basic auth on every provider; Ollama gets no headers.
+    headers = []
     if cfg.get("auth_header_value"):
-        target["auth"] = {"header_name": cfg["auth_header_name"], "header_value": cfg["auth_header_value"]}
-    return {"targets": [target]}
+        headers.append({"name": cfg["auth_header_name"], "value": cfg["auth_header_value"]})
+    provider_entity = {"name": name, "display_name": name, "type": provider, "labels": dict(labels),
+                       "config": {"auth": {"type": "basic", "headers": headers}}}
+    target = {"name": cfg["model"], "provider": name, "config": {"type": provider, **options}}
+    return provider_entity, target
 
 
 def compile_pipeline(graph: PipelineGraph, opts: CompileOptions | None = None) -> CompiledPipeline:
@@ -153,19 +165,12 @@ def compile_pipeline(graph: PipelineGraph, opts: CompileOptions | None = None) -
     if not a.ok:
         raise CompileError(a.issues)
 
-    tags = [TAG, f"pipeline:{graph.slug}"]
+    labels = {"managed-by": TAG, "pipeline": graph.slug}
     name = f"gs-{graph.slug}"
-    plugins: list[dict[str, Any]] = []
+    policies: list[dict[str, Any]] = []
 
-    request_plugins = [s.plugin for s in stages if s.phase == REQUEST]
     response_stages = [s for s in stages if s.phase == RESPONSE]
     segments = [s.segment for s in stages if s.segment]
-
-    def ordering_for(plugin: str) -> dict[str, Any] | None:
-        if plugin not in request_plugins:
-            return None
-        later = request_plugins[request_plugins.index(plugin) + 1:]
-        return {"before": {"access": [*later, "ai-proxy-advanced"]}}
 
     emitted: set[str] = set()
     for s in stages:
@@ -179,40 +184,40 @@ def compile_pipeline(graph: PipelineGraph, opts: CompileOptions | None = None) -
         else:
             config = datakit_config(segments, opts.engine_url, opts.datakit_debug, opts.engine_timeout_ms)
             instance = f"{name}-datakit"
-        plugin: dict[str, Any] = {"name": s.plugin, "instance_name": instance, "config": config, "tags": list(tags)}
-        if order := ordering_for(s.plugin):
-            plugin["ordering"] = order
-        plugins.append(plugin)
+        policies.append({"name": instance, "display_name": instance, "type": s.plugin,
+                         "labels": dict(labels), "config": config})
 
     llm = graph.node(a.llm)
-    plugins.append({
-        "name": "ai-proxy-advanced",
-        "instance_name": f"{name}-llm",
-        "config": _llm_plugin(catalog.with_defaults("llm", llm.config)),
-        "tags": list(tags),
-    })
+    provider, target = _llm_entities(catalog.with_defaults("llm", llm.config), f"{name}-llm", labels)
+    model = {
+        "name": name,
+        "display_name": name,
+        "type": "model",
+        "labels": dict(labels),
+        "formats": [{"type": "openai"}],
+        "capabilities": ["generate"],
+        "config": {"route": {"paths": [f"{opts.route_prefix.rstrip('/')}/{graph.slug}"]}},
+        "targets": [target],
+        "policies": [p["name"] for p in policies],
+    }
 
     if response_stages:
         a.warn("response-phase guardrails buffer the LLM response, so streaming (stream: true) is not guarded")
-    if len(response_stages) > 1:
-        a.warn("Kong dynamic ordering only applies to the access phase; response-phase plugins run in "
-               "Kong's priority order, not canvas order")
+    for phase in (REQUEST, RESPONSE):
+        if len({s.plugin for s in stages if s.phase == phase}) > 1:
+            a.warn(f"{phase}-phase policies run in Kong plugin priority order (DataKit before native AI plugins), "
+                   "not canvas order: AI Gateway policies have no dynamic ordering")
     if any(s.phase == REQUEST for s in stages if s.kind == "segment") and any(s.kind == "segment" for s in response_stages):
-        a.warn("one DataKit plugin handles both request and response segments; verify on the target data plane")
+        a.warn("one DataKit policy handles both request and response segments; verify on the target data plane")
 
-    service = {"name": name, "url": opts.service_url, "tags": list(tags)}
-    route = {
-        "name": name,
-        "paths": [f"{opts.route_prefix.rstrip('/')}/{graph.slug}"],
-        "methods": ["POST"],
-        "strip_path": True,
-        "tags": list(tags),
+    return CompiledPipeline(slug=graph.slug, provider=provider, model=model, policies=policies,
+                            stages=stages, issues=a.issues)
+
+
+def to_declarative(compiled: CompiledPipeline) -> dict[str, Any]:
+    """The pipeline's AI Gateway entities, keyed like kongctl's declarative format."""
+    return {
+        "ai_gateway_model_providers": [compiled.provider],
+        "ai_gateway_policies": compiled.policies,
+        "ai_gateway_models": [compiled.model],
     }
-    return CompiledPipeline(service=service, route=route, plugins=plugins, stages=stages, issues=a.issues)
-
-
-def to_deck(compiled: CompiledPipeline) -> dict[str, Any]:
-    """decK state file with the plugins attached to the pipeline's route."""
-    route = dict(compiled.route, plugins=compiled.plugins)
-    service = dict(compiled.service, routes=[route])
-    return {"_format_version": "3.0", "_info": {"select_tags": compiled.service["tags"][1:]}, "services": [service]}

@@ -51,6 +51,10 @@ def segment_nodes(segment: Segment, engine_url: str, timeout_ms: int = 10000) ->
     # UI-only fields (canvas position, label) stay out of the Kong config.
     spec = segment.model_dump(by_alias=True, exclude_none=True,
                               exclude={"nodes": {"__all__": {"position", "label"}}})
+    # Konnect rejects an empty object in static values; the engine defaults config to {}.
+    for n in spec["nodes"]:
+        if not n.get("config"):
+            n.pop("config", None)
     nodes: list[dict[str, Any]] = [
         {"name": f"{p}_SEGMENT", "type": "static", "values": {"segment": spec}},
         {

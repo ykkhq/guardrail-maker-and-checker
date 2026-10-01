@@ -287,7 +287,7 @@ export default function App() {
       if (r.ok) {
         setSaved(graphJson);
         await refreshList();
-        notify({ kind: "ok", text: `Deployed v${r.version} to Konnect → ${r.endpoint}` });
+        notify({ kind: "ok", text: `Deployed v${r.version} to Konnect → ${r.endpoint} (model: ${r.model})` });
         if (r.warnings?.length) setTab("config");
       } else {
         setIssues(r.issues ?? issues);
