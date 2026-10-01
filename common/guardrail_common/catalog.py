@@ -212,7 +212,7 @@ _TYPES: list[NodeType] = [
         label="LLM",
         category="LLM",
         kind="endpoint",
-        description="Proxies the request to an LLM provider with ai-proxy-advanced.",
+        description="Proxies the request to an LLM provider through the pipeline's AI Gateway model.",
         phases=(REQUEST, RESPONSE),
         plugin="ai-proxy-advanced",
         config_schema=_obj(
@@ -225,7 +225,7 @@ _TYPES: list[NodeType] = [
                 "upstream_url": {"type": "string", "title": "Upstream URL (Ollama or self-hosted)"},
                 "max_tokens": {"type": "integer", "minimum": 1},
                 "temperature": {"type": "number", "minimum": 0, "maximum": 2},
-                "options": {"type": "object", "title": "Extra model options (passed to ai-proxy-advanced model.options)"},
+                "options": {"type": "object", "title": "Extra model options (passed to the AI Gateway model target config)"},
             },
             required=["provider", "model"],
         ),
