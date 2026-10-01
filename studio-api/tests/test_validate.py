@@ -46,7 +46,7 @@ def test_custom_nodes_split_by_native_are_rejected(graph_of):
             {"source": "is_kasuhara", "sourceHandle": "false", "target": "llm"},
             {"source": "llm", "target": "out"},
         ]
-    with pytest.raises(CompileError, match="one DataKit plugin per route"):
+    with pytest.raises(CompileError, match="one DataKit policy"):
         compile_pipeline(graph_of(mutate))
 
 

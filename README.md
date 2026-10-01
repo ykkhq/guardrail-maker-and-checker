@@ -2,7 +2,7 @@
 
 Design prompt-guardrail flows as a graph, and run them on Kong AI Gateway (managed by Konnect).
 
-Status: all parts from the plan are working: the **engine**, the **compiler**, **Konnect deploy**, the **Web UI** and the **Docker stack**. The `jp-support` sample runs end to end on the `guardrail-service` control plane (US region).
+Status: all parts from the plan are working: the **engine**, the **compiler**, **Konnect deploy**, the **Web UI** and the **Docker stack**. The `jp-support` sample runs end to end on Kong AI Gateway 2.1, on the `guardrail-service` Konnect AI Gateway (US region).
 
 ## Web UI
 
@@ -11,7 +11,7 @@ Open **http://localhost:13000** once the stack is running.
 - **Canvas:** drag guardrails from the palette and connect `Prompt In → … → LLM → Response Out`. Condition nodes have `true`/`false` outputs. Node color shows where each step runs: indigo is a Kong plugin, teal is the guardrail engine (via DataKit), and orange is control.
 - **Inspector:** a settings form generated from each node's JSON Schema. Condition rules pick detector nodes from the canvas. Secret fields ask for `{vault://…}` references.
 - **Validation:** runs as you edit. Errors and warnings show as badges on the nodes and in the *Issues* tab. Deploy is disabled while there are errors.
-- **Config:** Kong's execution order and the compiled decK state.
+- **Config:** the stages and the compiled AI Gateway entities (model provider, policies, model).
 - **Save / Deploy / Versions:** Deploy saves the pipeline, compiles it, pushes it to Konnect and records a version. *Versions* rolls back to an earlier version and redeploys it.
 - **Playground:**
   - *Dry run* runs the canvas as it is now through the engine, with no deploy needed.
@@ -37,13 +37,15 @@ KONNECT_PAT_FILE=~/.kong/kpat uv run python -m guardrail_studio.deploy ../sample
 KONNECT_PAT_FILE=~/.kong/kpat uv run python -m guardrail_studio.bootstrap   # DP cert + kong/konnect.env
 cd .. && scripts/up.sh                                                        # OpenAI key from ~/.openai/creds
 
-curl -s localhost:18000/pipelines/jp-support -H 'content-type: application/json' \
-  -d '{"messages":[{"role":"user","content":"私のメールは user@example.com です"}]}'
+curl -s localhost:18000/pipelines/jp-support/chat/completions -H 'content-type: application/json' \
+  -d '{"model":"gs-jp-support","messages":[{"role":"user","content":"私のメールは user@example.com です"}]}'
 ```
+
+`--create` creates a Konnect **AI Gateway** (`/v1/ai-gateways`), not a Kong Gateway control plane: the AI Gateway data plane can only join an AI Gateway. Each pipeline is served at `/pipelines/{slug}/chat/completions`, and the request body must name the pipeline's model as `"model": "gs-{slug}"`. AI Gateway has no default model, so a request without it fails with 503 (`name resolution failed`). The playground adds it for you, and the deploy response shows it.
 
 | Service | Port | Notes |
 |---|---|---|
-| `kong-dp` | 18000 (proxy), 18100 (status) | Kong Gateway 3.14 data plane connected to Konnect with a pinned client certificate. |
+| `kong-dp` | 18000 (proxy), 18100 (status) | Kong AI Gateway 2.1 (`kong/kong-ai-gateway:2.1`) data plane connected to the Konnect AI Gateway with a registered client certificate. |
 | `guardrail-engine` | 18080 | Preloads Presidio (ja) and the sentiment model. Llama Guard uses the host's Ollama through `OLLAMA_HOST`. |
 | `studio-api` | 18200 | Pipelines (SQLite volume), compiler, Konnect deploy, playground. The Konnect PAT comes from `~/.kong/kpat` via `scripts/up.sh`. |
 | `web` | 13000 | The UI (nginx). Proxies `/api` to studio-api. |
@@ -51,7 +53,7 @@ curl -s localhost:18000/pipelines/jp-support -H 'content-type: application/json'
 
 Always (re)start containers with `scripts/up.sh [service…]`, not plain `docker compose up`. Otherwise the secret variables are empty, and `studio-api` loses Konnect access.
 
-The OpenAI key is passed to `kong-dp` as the environment variable `OPENAI_AUTH_HEADER` (`Bearer <key>`), which `{vault://env/OPENAI_AUTH_HEADER}` references. The DP certificate and key are passed the same way, as `KONG_CLUSTER_CERT` and `KONG_CLUSTER_CERT_KEY`. None of these are written to disk, but `docker inspect` shows them.
+The OpenAI key is passed to `kong-dp` as the environment variable `OPENAI_AUTH_HEADER` (`Bearer <key>`), which `{vault://env/OPENAI_AUTH_HEADER}` in the pipeline's model provider references. The DP certificate and key are passed the same way, as `KONG_CLUSTER_CERT` and `KONG_CLUSTER_CERT_KEY`. None of these are written to disk, but `docker inspect` shows them.
 
 ## Layout
 
@@ -59,17 +61,20 @@ The OpenAI key is passed to `kong-dp` as the environment variable `OPENAI_AUTH_H
 |---|---|
 | `common/guardrail_common/` | Shared by all parts. `graph.py`: the pipeline graph (React Flow shape). `catalog.py`: node types with JSON Schemas. `conditions.py`: condition rules. |
 | `engine/guardrail_engine/` | FastAPI service that runs custom detectors and control nodes. Kong DataKit calls it. |
-| `studio-api/guardrail_studio/` | FastAPI backend. `compiler/` turns a graph into Kong entities (service, route, plugins) or a decK file. `konnect.py` deploys them. `store.py` keeps pipelines and versions. `main.py` serves the UI API. |
+| `studio-api/guardrail_studio/` | FastAPI backend. `compiler/` turns a graph into AI Gateway entities (model provider, model, policies), also as a kongctl-style declarative file. `konnect.py` deploys them. `store.py` keeps pipelines and versions. `main.py` serves the UI API. |
 | `web/` | Vite + React + React Flow UI (`src/App.tsx`, `src/components/`). |
 | `samples/` | Example pipelines (`jp-support.json`). |
 
-## How a graph runs on Kong
+## How a graph runs on Kong AI Gateway
 
-- **Native nodes** (`ai_prompt_guard`, `ai_sanitizer`, `ai_azure_content_safety`, …) each become a Kong plugin on the pipeline's route (`/pipelines/{slug}`). Request-phase plugins use dynamic ordering (`ordering.before.access`) so they run in the order drawn on the canvas.
-- **Custom and control nodes** (Llama Guard, Presidio PII, sentiment/kasuhara, Laya, keyword, condition, block) in one phase form a *segment*. One DataKit plugin sends the segment spec plus the chat body to `POST /v1/segments/execute`. The engine returns either `allow` with the rewritten (masked) body, or `block` with a status. DataKit then writes the body upstream or exits with that status.
-- **LLM** becomes `ai-proxy-advanced`.
+A pipeline becomes three kinds of Konnect AI Gateway entities, all labelled `pipeline: {slug}`:
+- **LLM** becomes a model provider `gs-{slug}-llm` and a model `gs-{slug}` that targets it. The model's route is `/pipelines/{slug}` (AI Gateway appends `/chat/completions`).
+- **Native nodes** (`ai_prompt_guard`, `ai_sanitizer`, `ai_azure_content_safety`, …) each become a policy whose type is the Kong plugin name. The model lists the policies.
+- **Custom and control nodes** (Llama Guard, Presidio PII, sentiment/kasuhara, Laya, keyword, condition, block) in one phase form a *segment*. One DataKit policy sends the segment spec plus the chat body to `POST /v1/segments/execute`. The engine returns either `allow` with the rewritten (masked) body, or `block` with a status. DataKit then writes the body upstream or exits with that status.
 
-Kong runs one instance of each plugin per route. That gives two canvas rules, and `validate` checks both:
+**Execution order is Kong's plugin priority, not the canvas.** AI Gateway policies don't accept `ordering`, and the order of the model's `policies` list has no effect. On the data plane, DataKit (the engine segment) runs before the native AI plugins even when a native node comes first on the canvas. Compiling warns about this whenever a phase has more than one policy.
+
+A model runs one instance of each policy type. That gives two canvas rules, and `validate` checks both:
 - Each native plugin type can be used only once.
 - In each phase, all custom/control nodes must be next to each other. A native plugin cannot sit between them.
 
@@ -91,9 +96,9 @@ Checks run on the last user message. Masking applies to every user message, so P
 
 ```bash
 uv sync --all-packages           # light deps only (no ML models)
-uv run pytest                    # 46 tests; real-model tests are skipped
+uv run pytest                    # real-model tests are skipped
 uv run pytest -m models          # real models: needs `uv sync --extra models` (in engine/), spaCy ja_core_news_trf, Ollama
-UPDATE_GOLDEN=1 uv run pytest studio-api/tests/test_compile.py   # regenerate the decK golden file after an intended change
+UPDATE_GOLDEN=1 uv run pytest studio-api/tests/test_compile.py   # regenerate the AI Gateway golden file after an intended change
 
 uv run uvicorn guardrail_engine.main:app --port 8080      # engine
 uv run uvicorn guardrail_studio.main:app --port 8000      # studio-api
@@ -165,9 +170,14 @@ Condition rules can branch on `flags.categories contains <id>`; the editor lists
 - Presidio's language comes from node config.
 - Laya questions are configurable (see above), and their answers are flags that condition nodes can branch on.
 
-## To verify on a real data plane (Phase 0 spike)
+## Verified on Kong AI Gateway 2.1
 
-- DataKit `output: service_request.body` rewrites the body before `ai-proxy-advanced` reads it.
-- Dynamic ordering between `datakit` and the AI guard plugins at runtime (Konnect accepts the config).
-- One DataKit plugin that carries both request- and response-phase nodes.
-- Field names in the native plugin schemas (`catalog.py`) for the pinned Kong version.
+- DataKit `output: service_request.body` rewrites the body before the model's proxy reads it (masked PII reaches the LLM as `<EMAIL_ADDRESS>`).
+- `{vault://env/OPENAI_AUTH_HEADER}` in the model provider's auth header resolves on the data plane.
+- Policies run in Kong plugin priority order, whatever the order of the model's `policies` list (DataKit before `ai-prompt-guard`).
+
+Still to verify:
+- One DataKit policy that carries both request- and response-phase nodes.
+- Field names in the native plugin schemas (`catalog.py`) for AI Gateway 2.1.
+
+The old Kong Gateway control plane named `guardrail-service` (`/v2/control-planes`) is no longer used. Delete it in Konnect when you no longer need it.

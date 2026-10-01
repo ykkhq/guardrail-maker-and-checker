@@ -1,8 +1,8 @@
-"""Deploy a pipeline graph to Konnect.
+"""Deploy a pipeline graph to a Konnect AI Gateway.
 
   KONNECT_PAT_FILE=~/.kong/kpat uv run python -m guardrail_studio.deploy samples/jp-support.json
-  ... --find-only       only locate the control plane
-  ... --create          create the control plane if missing (in --region)
+  ... --find-only       only locate the AI Gateway
+  ... --create          create the AI Gateway if missing (in --region)
   ... --undeploy        remove the pipeline's entities
 """
 
@@ -21,7 +21,7 @@ from guardrail_studio.konnect import REGIONS, Konnect, KonnectError, load_token
 
 
 def locate(token: str, name: str, region: str | None) -> tuple[str, dict | None]:
-    """Return (region, control plane) searching all regions unless one is given."""
+    """Return (region, AI Gateway) searching all regions unless one is given."""
     for r in [region] if region else REGIONS:
         try:
             with Konnect(token, r, timeout=10) as k:
@@ -51,12 +51,12 @@ def main(argv: list[str] | None = None) -> int:
     with Konnect(token, region) as k:
         if cp is None:
             if not args.create:
-                print(f"control plane '{args.control_plane}' not found (use --create --region <r>)")
+                print(f"AI Gateway '{args.control_plane}' not found (use --create --region <r>)")
                 return 2
             cp = k.ensure_control_plane(args.control_plane, "Guardrail Studio pipelines")
-            print(f"created control plane {cp['name']} ({cp['id']}) in {region}")
-        print(f"control plane: {cp['name']} id={cp['id']} region={region} "
-              f"endpoint={cp.get('config', {}).get('control_plane_endpoint')}")
+            print(f"created AI Gateway {cp['name']} ({cp['id']}) in {region}")
+        print(f"AI Gateway: {cp['name']} id={cp['id']} region={region} "
+              f"endpoint={cp.get('endpoints', {}).get('configuration')}")
         if args.find_only or not args.graph:
             return 0
 
@@ -77,11 +77,11 @@ def main(argv: list[str] | None = None) -> int:
         except KonnectError as exc:
             print(f"deploy failed: {exc}")
             return 1
-        print(f"deployed service={res.service_id} route={res.route_id}")
-        for inst, pid in res.plugins.items():
-            print(f"  plugin {inst} = {pid}")
-        for inst in res.deleted:
-            print(f"  removed stale plugin {inst}")
+        print(f"deployed model={res.model_id} provider={res.provider_id} endpoint={compiled.endpoint_path}")
+        for name, pid in res.policies.items():
+            print(f"  policy {name} = {pid}")
+        for name in res.deleted:
+            print(f"  removed stale policy {name}")
     return 0
 
 

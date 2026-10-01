@@ -5,12 +5,12 @@ from fastapi.testclient import TestClient
 from guardrail_studio.konnect import Konnect
 from guardrail_studio.main import Settings, create_app
 
-from studio_fakes import FakeKonnect
+from studio_fakes import GW, FakeKonnect
 
 
 class FakeCPKonnect(Konnect):
     def find_control_plane(self, name):
-        return {"id": "cp-1", "name": name}
+        return {"id": GW, "name": name}
 
 
 @pytest.fixture
@@ -58,10 +58,10 @@ def test_save_keeps_canvas_positions(env, jp_support_dict):
     assert client.get("/v1/pipelines/jp-support").json()["nodes"][0]["position"] == {"x": 10.0, "y": 20.0}
 
 
-def test_compile_deck(env, jp_support_dict):
-    r = env[0].post("/v1/compile", json={"graph": jp_support_dict, "format": "deck"})
+def test_compile_declarative(env, jp_support_dict):
+    r = env[0].post("/v1/compile", json={"graph": jp_support_dict, "format": "declarative"})
     assert r.status_code == 200
-    assert r.json()["result"]["services"][0]["routes"][0]["paths"] == ["/pipelines/jp-support"]
+    assert r.json()["result"]["ai_gateway_models"][0]["config"]["route"]["paths"] == ["/pipelines/jp-support"]
 
 
 def test_compile_invalid_returns_issues(env, jp_support_dict):
@@ -74,7 +74,9 @@ def test_deploy_snapshots_versions_and_rollback(env, jp_support_dict):
     client, fake, _ = env
     r = client.post("/v1/pipelines/jp-support/deploy", json=jp_support_dict)
     assert r.status_code == 200, r.text
-    assert r.json()["version"] == 1 and len(fake.plugins) == 3
+    assert r.json()["version"] == 1 and len(fake.policies) == 2 and len(fake.models) == 1
+    assert r.json()["endpoint"].endswith("/pipelines/jp-support/chat/completions")
+    assert r.json()["model"] == "gs-jp-support"
 
     jp_support_dict["name"] = "renamed"
     assert client.post("/v1/pipelines/jp-support/deploy", json=jp_support_dict).json()["version"] == 2
@@ -97,7 +99,7 @@ def test_playground_live_includes_engine_trace(env):
                                             "messages": [{"role": "user", "content": "hi"}]}).json()
     assert r["live"]["status"] == 403 and r["live"]["kong_request_id"] == "r1"
     assert r["trace"]["decision"] == "allow"
-    assert calls[-2:] == ["http://engine/v1/dry-run", "http://kong/pipelines/jp-support"]
+    assert calls[-2:] == ["http://engine/v1/dry-run", "http://kong/pipelines/jp-support/chat/completions"]
 
 
 def test_catalog_marks_detectors_the_engine_cannot_run(env):

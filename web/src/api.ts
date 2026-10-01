@@ -24,7 +24,7 @@ export const api = {
   validate: (g: PipelineGraph) => call<ValidateResult>("POST", "/validate", g),
   compile: (g: PipelineGraph) =>
     call<{ ok: boolean; result?: unknown; stages?: DeployResult["stages"]; warnings?: string[]; issues?: Issue[] }>(
-      "POST", "/compile", { graph: g, format: "deck" }),
+      "POST", "/compile", { graph: g, format: "declarative" }),
   list: () => call<{ pipelines: PipelineSummary[] }>("GET", "/pipelines").then((r) => r.pipelines),
   get: (slug: string) => call<PipelineGraph>("GET", `/pipelines/${slug}`),
   save: (g: PipelineGraph) => call<{ ok: boolean }>("PUT", `/pipelines/${g.slug}`, g),

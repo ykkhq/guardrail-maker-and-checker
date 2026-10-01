@@ -1,19 +1,19 @@
-"""Minimal Konnect client: find/create the control plane and deploy compiled pipelines.
+"""Minimal Konnect client: find/create the AI Gateway and deploy compiled pipelines.
 
 The token is read from KONNECT_PAT_FILE (preferred) or KONNECT_PAT. It is only
 ever sent in the Authorization header, never logged or returned.
 
-Deploy is an idempotent upsert: Konnect's PUT needs a UUID, so each entity id
-is a uuid5 of its kind and name. Every entity carries the `pipeline:{slug}` tag,
-so stale plugins of the pipeline are deleted and nothing else on the control
-plane is touched.
+Deploy is an idempotent upsert by name: the AI Gateway API cannot PUT a new
+entity under a client-chosen id, so existing entities are looked up by name and
+updated, others are created. Every entity carries the `pipeline: {slug}` label,
+so stale policies of the pipeline are deleted and nothing else on the AI
+Gateway is touched.
 """
 
 from __future__ import annotations
 
 import os
 import pathlib
-import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -22,12 +22,8 @@ import httpx
 from guardrail_studio.compiler import CompiledPipeline
 
 REGIONS = ("us", "eu", "au", "me", "in", "sg")
-_NS = uuid.uuid5(uuid.NAMESPACE_DNS, "guardrail-studio.konghq.local")
-
-
-def entity_id(kind: str, name: str) -> str:
-    """Stable id, so redeploying the same pipeline updates the same entities."""
-    return str(uuid.uuid5(_NS, f"{kind}/{name}"))
+GATEWAYS = "/v1/ai-gateways"
+_PAGE_SIZE = 100
 
 
 class KonnectError(Exception):
@@ -47,9 +43,9 @@ def load_token() -> str:
 @dataclass
 class DeployResult:
     control_plane_id: str
-    service_id: str
-    route_id: str
-    plugins: dict[str, str] = field(default_factory=dict)  # instance_name -> id
+    provider_id: str
+    model_id: str
+    policies: dict[str, str] = field(default_factory=dict)  # policy name -> id
     deleted: list[str] = field(default_factory=list)
 
 
@@ -83,77 +79,87 @@ class Konnect:
             raise KonnectError(method, path, r.status_code, body)
         return r.json() if r.content else None
 
-    # --- control planes -----------------------------------------------------------
+    def _pages(self, path: str) -> list[dict[str, Any]]:
+        """Every item of a page-numbered AI Gateway list (name filters are ignored server side)."""
+        items: list[dict[str, Any]] = []
+        number = 1
+        while True:
+            page = self._req("GET", path, params={"page[number]": number, "page[size]": _PAGE_SIZE}) or {}
+            data = page.get("data") or []
+            items += data
+            if len(data) < _PAGE_SIZE:
+                return items
+            number += 1
+
+    # --- AI Gateways (the control plane the AI Gateway data plane joins) --------------
 
     def find_control_plane(self, name: str) -> dict[str, Any] | None:
-        data = self._req("GET", "/v2/control-planes", params={"filter[name][eq]": name})["data"]
-        return data[0] if data else None
+        return next((g for g in self._pages(GATEWAYS) if g.get("name") == name), None)
 
     def ensure_control_plane(self, name: str, description: str = "") -> dict[str, Any]:
-        """Hybrid control plane: the data plane runs self-hosted in Docker."""
-        if cp := self.find_control_plane(name):
-            return cp
-        return self._req("POST", "/v2/control-planes", json={
+        """Hybrid AI Gateway: the data plane runs self-hosted in Docker."""
+        if gw := self.find_control_plane(name):
+            return gw
+        return self._req("POST", GATEWAYS, json={
             "name": name,
+            "display_name": name,
             "description": description,
-            "cluster_type": "CLUSTER_TYPE_CONTROL_PLANE",
-            "auth_type": "pki_client_certs",
+            "min_runtime_version": "2.1",
             "labels": {"managed-by": "guardrail-studio"},
         })
 
-    def dp_certificates(self, cp_id: str) -> list[dict[str, Any]]:
-        page = self._req("GET", f"/v2/control-planes/{cp_id}/dp-client-certificates") or {}
-        return page.get("items") or page.get("data") or []  # {} when none are pinned
+    def dp_certificates(self, gw_id: str) -> list[dict[str, Any]]:
+        return self._pages(f"{GATEWAYS}/{gw_id}/data-plane-certificates")
 
-    def ensure_dp_certificate(self, cp_id: str, cert_pem: str) -> bool:
-        """Pin a data-plane client certificate. Returns True if it was newly added."""
-        if any(c["cert"].strip() == cert_pem.strip() for c in self.dp_certificates(cp_id)):
+    def ensure_dp_certificate(self, gw_id: str, cert_pem: str) -> bool:
+        """Pin a data-plane client certificate. Returns True if it was newly added.
+
+        An AI Gateway holds one certificate, so any other one is removed first.
+        """
+        base = f"{GATEWAYS}/{gw_id}/data-plane-certificates"
+        certs = self.dp_certificates(gw_id)
+        if any(c.get("cert", "").strip() == cert_pem.strip() for c in certs):
             return False
-        self._req("POST", f"/v2/control-planes/{cp_id}/dp-client-certificates", json={"cert": cert_pem})
+        for c in certs:
+            self._req("DELETE", f"{base}/{c['id']}")
+        self._req("POST", base, json={"cert": cert_pem, "title": "guardrail-studio-dp"})
         return True
 
-    # --- core entities -------------------------------------------------------------
+    # --- models, model providers, policies ----------------------------------------
 
-    def _core(self, cp_id: str) -> str:
-        return f"/v2/control-planes/{cp_id}/core-entities"
+    def _list(self, gw_id: str, kind: str, slug: str) -> list[dict[str, Any]]:
+        """The pipeline's entities of one kind (by label)."""
+        items = self._pages(f"{GATEWAYS}/{gw_id}/{kind}")
+        return [e for e in items if (e.get("labels") or {}).get("pipeline") == slug]
 
-    def list_by_tag(self, cp_id: str, kind: str, tag: str) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        params: dict[str, Any] = {"tags": tag, "size": 1000}
-        while True:
-            page = self._req("GET", f"{self._core(cp_id)}/{kind}", params=params)
-            items += page.get("data", [])
-            offset = page.get("offset")
-            if not offset:
-                return items
-            params["offset"] = offset
+    def _upsert(self, gw_id: str, kind: str, entity: dict[str, Any], existing: list[dict[str, Any]]) -> str:
+        base = f"{GATEWAYS}/{gw_id}/{kind}"
+        if found := next((e for e in existing if e["name"] == entity["name"]), None):
+            self._req("PUT", f"{base}/{found['id']}", json=entity)
+            return found["id"]
+        return self._req("POST", base, json=entity)["id"]
 
-    def deploy(self, cp_id: str, compiled: CompiledPipeline) -> DeployResult:
-        base = self._core(cp_id)
-        svc_id = entity_id("service", compiled.service["name"])
-        route_id = entity_id("route", compiled.route["name"])
-        self._req("PUT", f"{base}/services/{svc_id}", json=compiled.service)
-        self._req("PUT", f"{base}/routes/{route_id}", json=compiled.route | {"service": {"id": svc_id}})
-        result = DeployResult(control_plane_id=cp_id, service_id=svc_id, route_id=route_id)
+    def deploy(self, gw_id: str, compiled: CompiledPipeline) -> DeployResult:
+        slug = compiled.slug
+        provider_id = self._upsert(gw_id, "model-providers", compiled.provider,
+                                   self._list(gw_id, "model-providers", slug))
+        existing = self._list(gw_id, "policies", slug)
+        policies = {p["name"]: self._upsert(gw_id, "policies", p, existing) for p in compiled.policies}
+        model_id = self._upsert(gw_id, "models", compiled.model, self._list(gw_id, "models", slug))
+        result = DeployResult(control_plane_id=gw_id, provider_id=provider_id, model_id=model_id, policies=policies)
 
-        # Remove stale plugins first, so a plugin that moved to a new instance
-        # name does not collide with the one-plugin-per-route rule.
-        wanted = {entity_id("plugin", p["instance_name"]): p for p in compiled.plugins}
-        for p in self.list_by_tag(cp_id, "plugins", compiled.service["tags"][1]):
-            if p["id"] not in wanted:
-                self._req("DELETE", f"{base}/plugins/{p['id']}")
-                result.deleted.append(p.get("instance_name") or p["id"])
-
-        for pid, plugin in wanted.items():
-            self._req("PUT", f"{base}/plugins/{pid}", json=plugin | {"route": {"id": route_id}})
-            result.plugins[plugin["instance_name"]] = pid
+        # The model no longer lists stale policies, so they can be deleted now.
+        for p in existing:
+            if p["name"] not in policies:
+                self._req("DELETE", f"{GATEWAYS}/{gw_id}/policies/{p['id']}")
+                result.deleted.append(p["name"])
         return result
 
-    def undeploy(self, cp_id: str, slug: str) -> list[str]:
-        """Delete everything tagged pipeline:{slug}: plugins, then routes, then services."""
-        base, tag, removed = self._core(cp_id), f"pipeline:{slug}", []
-        for kind in ("plugins", "routes", "services"):
-            for e in self.list_by_tag(cp_id, kind, tag):
-                self._req("DELETE", f"{base}/{kind}/{e['id']}")
-                removed.append(f"{kind}/{e.get('name') or e.get('instance_name') or e['id']}")
+    def undeploy(self, gw_id: str, slug: str) -> list[str]:
+        """Delete everything labelled pipeline={slug}: the model, then policies and providers."""
+        removed = []
+        for kind in ("models", "policies", "model-providers"):
+            for e in self._list(gw_id, kind, slug):
+                self._req("DELETE", f"{GATEWAYS}/{gw_id}/{kind}/{e['id']}")
+                removed.append(f"{kind}/{e['name']}")
         return removed

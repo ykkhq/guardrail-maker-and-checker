@@ -20,7 +20,7 @@ export function ConfigPanel({ config }: { config: { result?: unknown; stages?: a
   if (!config) return <p className="muted pad">Fix the errors to see the compiled config.</p>;
   return (
     <div className="pad config">
-      <h4>Kong execution order</h4>
+      <h4>Stages (canvas order)</h4>
       <ol className="stages">
         {config.stages?.map((s, i) => (
           <li key={i}>
@@ -31,7 +31,7 @@ export function ConfigPanel({ config }: { config: { result?: unknown; stages?: a
         <li><span className="mono">ai-proxy-advanced</span> <span className="muted">(LLM)</span></li>
       </ol>
       {config.warnings?.map((w, i) => <p key={i} className="note">{w}</p>)}
-      <h4>decK state</h4>
+      <h4>AI Gateway entities</h4>
       <pre className="code">{JSON.stringify(config.result, null, 2)}</pre>
     </div>
   );

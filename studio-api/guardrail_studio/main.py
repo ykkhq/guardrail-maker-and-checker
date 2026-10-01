@@ -2,7 +2,7 @@
 
   GET    /v1/catalog                         node types (palette + inspector forms)
   POST   /v1/validate                        issues, plus rule fields per detector for the condition editor
-  POST   /v1/compile                         Kong entities (format=deck for a decK file)
+  POST   /v1/compile                         AI Gateway entities (format=declarative for a kongctl-style file)
   POST   /v1/preview/llamaguard              the Llama Guard prompt for a node config
   GET    /v1/pipelines                       saved pipelines
   GET    /v1/pipelines/{slug}                one pipeline graph
@@ -14,8 +14,8 @@
   POST   /v1/playground                      run a prompt: live through Kong, or dry-run on the engine
   GET    /v1/status                          Konnect / data plane / engine reachability
 
-Environment: KONNECT_PAT_FILE or KONNECT_PAT, KONNECT_REGION (us), KONNECT_CONTROL_PLANE
-(guardrail-service), GUARDRAIL_ENGINE_URL (URL Kong uses to reach the engine),
+Environment: KONNECT_PAT_FILE or KONNECT_PAT, KONNECT_REGION (us), KONNECT_CONTROL_PLANE (the AI Gateway name,
+guardrail-service), GUARDRAIL_ENGINE_URL (URL Kong uses to reach the engine),
 ENGINE_URL (URL studio-api uses; defaults to GUARDRAIL_ENGINE_URL), KONG_PROXY_URL, KONG_PUBLIC_URL,
 STUDIO_DB, STUDIO_SAMPLES_DIR, STUDIO_CORS_ORIGINS.
 """
@@ -36,7 +36,8 @@ from pydantic import BaseModel, Field
 from guardrail_common import catalog, llamaguard, outputs
 from guardrail_common.catalog import CATALOG
 from guardrail_common.graph import PipelineGraph
-from guardrail_studio.compiler import CompileError, CompileOptions, compile_pipeline, to_deck, validate
+from guardrail_studio.compiler import CompileError, CompileOptions, compile_pipeline, to_declarative, validate
+from guardrail_studio.compiler.compile import CHAT_SUFFIX
 from guardrail_studio.konnect import Konnect, KonnectError, load_token
 from guardrail_studio.store import Store
 
@@ -45,7 +46,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 class CompileRequest(BaseModel):
     graph: PipelineGraph
-    format: Literal["entities", "deck"] = "entities"
+    format: Literal["entities", "declarative"] = "entities"
 
 
 class PlaygroundRequest(BaseModel):
@@ -100,7 +101,7 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
         if "id" not in cp_cache:
             cp = k.find_control_plane(cfg.control_plane)
             if not cp:
-                raise HTTPException(503, f"control plane '{cfg.control_plane}' not found in {cfg.region}")
+                raise HTTPException(503, f"AI Gateway '{cfg.control_plane}' not found in {cfg.region}")
             cp_cache["id"] = cp["id"]
         return cp_cache["id"]
 
@@ -170,9 +171,9 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
         except CompileError as exc:
             return _issues(exc)
         result = (
-            to_deck(compiled)
-            if req.format == "deck"
-            else {"service": compiled.service, "route": compiled.route, "plugins": compiled.plugins}
+            to_declarative(compiled)
+            if req.format == "declarative"
+            else {"provider": compiled.provider, "model": compiled.model, "policies": compiled.policies}
         )
         return {"ok": True, "result": result, "stages": [s.describe() for s in compiled.stages],
                 "warnings": compiled.warnings}
@@ -223,13 +224,13 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
                 res = k.deploy(cp_id(k), compiled)
         except KonnectError as exc:
             return JSONResponse(status_code=502, content={"ok": False, "error": str(exc), "konnect": exc.body})
-        version = store.add_version(graph, {"service": compiled.service, "route": compiled.route,
-                                            "plugins": compiled.plugins})
+        version = store.add_version(graph, {"provider": compiled.provider, "model": compiled.model,
+                                            "policies": compiled.policies})
         return {"ok": True, "version": version, "warnings": compiled.warnings,
                 "stages": [s.describe() for s in compiled.stages],
-                "deployed": {"service_id": res.service_id, "route_id": res.route_id, "plugins": res.plugins,
+                "deployed": {"model_id": res.model_id, "provider_id": res.provider_id, "policies": res.policies,
                              "deleted": res.deleted},
-                "endpoint": f"{cfg.kong_public_url}{compiled.route['paths'][0]}"}
+                "endpoint": f"{cfg.kong_public_url}{compiled.endpoint_path}", "model": compiled.model_name}
 
     @app.post("/v1/pipelines/{slug}/deploy")
     def deploy_pipeline(slug: str, graph: PipelineGraph | None = None):
@@ -265,7 +266,8 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
         graph = req.graph or store.get(req.slug)
         if not graph:
             raise HTTPException(404, f"pipeline '{req.slug}' not found")
-        body = {"messages": req.messages}
+        # The AI Gateway selects the pipeline's model by the body's `model`.
+        body = {"model": f"gs-{req.slug}", "messages": req.messages}
         out: dict[str, Any] = {"mode": req.mode}
 
         # The engine trace (dry run) is always included: it explains which path
@@ -280,7 +282,7 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
         if req.mode == "live":
             t0 = time.perf_counter()
             try:
-                r = client.post(f"{cfg.kong_proxy_url}/pipelines/{req.slug}", json=body)
+                r = client.post(f"{cfg.kong_proxy_url}{opts.route_prefix}/{req.slug}{CHAT_SUFFIX}", json=body)
                 try:
                     payload: Any = r.json()
                 except ValueError:

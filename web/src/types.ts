@@ -94,6 +94,7 @@ export interface DeployResult {
   version?: number;
   warnings?: string[];
   endpoint?: string;
+  model?: string;
   stages?: { phase: string; plugin: string; node?: string; nodes?: string[] }[];
   issues?: Issue[];
   error?: string;
