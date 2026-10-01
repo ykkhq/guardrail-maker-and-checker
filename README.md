@@ -8,7 +8,7 @@ Status: all parts from the plan are working: the **engine**, the **compiler**, *
 
 Open **http://localhost:13000** once the stack is running.
 
-- **Canvas:** drag guardrails from the palette and connect `Prompt In → … → LLM → Response Out`. Condition nodes have `true`/`false` outputs. Node color shows where each step runs: indigo is a Kong plugin, teal is the guardrail engine (via DataKit), and orange is control.
+- **Canvas:** drag guardrails from the palette and connect `Prompt In → … → LLM → Response Out`. Condition nodes have `true`/`false` outputs. Node color shows where each step runs: indigo is an AI Gateway policy (a native Kong AI plugin), teal is the guardrail engine (via DataKit), and orange is control.
 - **Inspector:** a settings form generated from each node's JSON Schema. Condition rules pick detector nodes from the canvas. Secret fields ask for `{vault://…}` references.
 - **Validation:** runs as you edit. Errors and warnings show as badges on the nodes and in the *Issues* tab. Deploy is disabled while there are errors.
 - **Config:** the stages and the compiled AI Gateway entities (model provider, policies, model).
@@ -75,8 +75,8 @@ A pipeline becomes three kinds of Konnect AI Gateway entities, all labelled `pip
 **Execution order is Kong's plugin priority, not the canvas.** AI Gateway policies don't accept `ordering`, and the order of the model's `policies` list has no effect. On the data plane, DataKit (the engine segment) runs before the native AI plugins even when a native node comes first on the canvas. Compiling warns about this whenever a phase has more than one policy.
 
 A model runs one instance of each policy type. That gives two canvas rules, and `validate` checks both:
-- Each native plugin type can be used only once.
-- In each phase, all custom/control nodes must be next to each other. A native plugin cannot sit between them.
+- Each native policy type can be used only once.
+- In each phase, all custom/control nodes must be next to each other. A native policy cannot sit between them.
 
 A native node also cannot sit inside a branch, because it runs on every request.
 
