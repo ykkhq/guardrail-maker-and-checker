@@ -371,7 +371,14 @@ def create_app(settings: Settings | None = None, konnect_factory=None,
         graph = req.graph or store.get(req.slug)
         if not graph:
             raise HTTPException(404, f"pipeline '{req.slug}' not found")
-        body = {"model": f"gs-{req.slug}", "messages": req.messages}
+        # Konnect selects the AI Gateway model by gs-{slug}. Gateway ai-proxy-advanced
+        # requires the body model to match the LLM node's configured upstream model name.
+        if cfg.deploy_target == "gateway":
+            llm = next((n for n in graph.nodes if n.type == "llm"), None)
+            model = (llm.config.get("model") if llm else None) or f"gs-{req.slug}"
+        else:
+            model = f"gs-{req.slug}"
+        body = {"model": model, "messages": req.messages}
         out: dict[str, Any] = {"mode": req.mode}
 
         try:
