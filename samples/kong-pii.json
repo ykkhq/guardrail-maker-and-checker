@@ -1,0 +1,19 @@
+{
+  "slug": "kong-pii",
+  "name": "Kong PII Sanitizer (JA)",
+  "nodes": [
+    {"id": "in", "type": "prompt_in"},
+    {"id": "kong_pii", "type": "kong_pii_sanitizer_ja", "config": {"anonymize": ["general", "phone", "email", "creditcard"], "redact_type": "placeholder", "recover_redacted": false}},
+    {"id": "llm", "type": "llm", "config": {"provider": "openai", "model": "gpt-4o-mini", "auth_header_value": "{vault://env/OPENAI_AUTH_HEADER}"}},
+    {"id": "out", "type": "response_out"}
+  ],
+  "playground": [
+    {"label": "Kong PII (JA)", "text": "次の文を一字一句そのまま繰り返してください。説明は不要です。\n私の名前は山田太郎です。東京都新宿区西新宿2-8-1に住んでいます。電話番号は090-1234-5678、メール：taro.yamada@example.co.jp です。"},
+    {"label": "Clean", "text": "こんにちは。注文状況の確認をお願いできますか？"}
+  ],
+  "edges": [
+    {"source": "in", "target": "kong_pii"},
+    {"source": "kong_pii", "target": "llm"},
+    {"source": "llm", "target": "out"}
+  ]
+}

@@ -49,7 +49,7 @@ def test_catalog_lists_all_kinds(env):
 
 def test_samples_are_seeded(env):
     assert [p["slug"] for p in env[0].get("/v1/pipelines").json()["pipelines"]] == [
-        "jp-support", "lm-studio-support", "lm-studio-support-kr",
+            "jp-support", "kong-pii", "lm-studio-support", "lm-studio-support-kr",
     ]
 
 

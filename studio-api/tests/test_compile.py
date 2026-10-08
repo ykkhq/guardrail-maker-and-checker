@@ -67,6 +67,20 @@ def test_reordering_nodes_changes_plugin_order(graph_of):
     assert c.model["policies"] == ["gs-jp-support-datakit", "gs-jp-support-prompt_guard"]
 
 
+def test_kong_pii_sanitizer_compiles_to_ai_sanitizer_policy(graph_of):
+    def mutate(d):
+        d["nodes"].append({"id": "kong_pii", "type": "kong_pii_sanitizer_ja",
+                           "config": {"anonymize": ["phone", "email"]}})
+        d["edges"].remove({"source": "in", "target": "prompt_guard"})
+        d["edges"] += [{"source": "in", "target": "kong_pii"}, {"source": "kong_pii", "target": "prompt_guard"}]
+    c = compile_pipeline(graph_of(mutate))
+    p = next(p for p in c.policies if p["type"] == "ai-sanitizer")
+    assert p["name"] == "gs-jp-support-kong_pii"
+    assert p["config"]["anonymize"] == ["phone", "email"]
+    assert (p["config"]["host"], p["config"]["port"], p["config"]["redact_type"]) == ("ai-pii-service-ja", 8080, "placeholder")
+    assert "gs-jp-support-kong_pii" in c.model["policies"]
+
+
 def test_llm_provider_mapping():
     g = PipelineGraph.model_validate({
         "slug": "local", "nodes": [
