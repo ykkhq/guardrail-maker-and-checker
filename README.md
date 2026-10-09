@@ -40,11 +40,13 @@ curl -s localhost:18000/pipelines/jp-support/chat/completions -H 'content-type: 
 
 | Service | Port | Notes |
 |---|---|---|
-| `kong-dp` | 18000 (proxy), 18100 (status) | Profile `konnect-dp`. Kong AI Gateway 2.1 data plane. |
-| `guardrail-engine` | 18080 | Presidio (ja), sentiment, Llama Guard (Ollama or LM Studio). |
-| `studio-api` | 18200 | Pipelines, compiler, deploy, playground. |
-| `web` | 13000 | UI (nginx). |
-| `ollama` | – | Optional (`--profile ollama`). |
+| `kong-dp` | 18000 (proxy), 18100 (status) | Kong AI Gateway 2.1 (`kong/kong-ai-gateway:2.1`) data plane connected to the Konnect AI Gateway with a registered client certificate. |
+| `guardrail-engine` | 18080 | Preloads Presidio (ja) and the sentiment model. Llama Guard uses the host's Ollama through `OLLAMA_HOST`. |
+| `ai-pii-service-ja` | 18090 | Kong's PII anonymizer for Japanese (`kong/ai-pii-service:v0.2.2-ja`), called by the Kong PII Sanitizer (JA) node at `ai-pii-service-ja:8080`. |
+| `ai-pii-service-en` | 18091 | The same for English (`kong/ai-pii-service:v0.2.2-en`), used by the Kong PII Sanitizer (EN) and AI Sanitizer nodes. |
+| `studio-api` | 18200 | Pipelines (SQLite volume), compiler, Konnect deploy, playground. The Konnect PAT comes from `~/.kong/kpat` via `scripts/up.sh`. |
+| `web` | 13000 | The UI (nginx). Proxies `/api` to studio-api. |
+| `ollama` | – | Optional (`--profile ollama`). Use it if there is no Ollama on the host. |
 
 Always (re)start with `scripts/up.sh [service…]`, not plain `docker compose up`.
 
@@ -82,15 +84,20 @@ DataKit reaches the engine at `http://host.docker.internal:18080`. Llama Guard u
 
 | Path | What it is |
 |---|---|
-| `common/guardrail_common/` | Shared graph, catalog, conditions. |
-| `engine/guardrail_engine/` | FastAPI detectors; Kong DataKit calls it. |
-| `studio-api/guardrail_studio/` | Compiler, Konnect / Gateway Admin deploy, UI API. |
-| `web/` | Vite + React + React Flow UI. |
-| `samples/` | `jp-support.json` (Konnect/OpenAI), `lm-studio-support.json` (EN), `lm-studio-support-kr.json` (KR). |
+| `common/guardrail_common/` | Shared by all parts. `graph.py`: the pipeline graph (React Flow shape). `catalog.py`: node types with JSON Schemas. `conditions.py`: condition rules. |
+| `engine/guardrail_engine/` | FastAPI service that runs custom detectors and control nodes. Kong DataKit calls it. |
+| `studio-api/guardrail_studio/` | FastAPI backend. `compiler/` turns a graph into AI Gateway entities (model provider, model, policies), also as a kongctl-style declarative file. `konnect.py` deploys them. `store.py` keeps pipelines and versions. `main.py` serves the UI API. |
+| `web/` | Vite + React + React Flow UI (`src/App.tsx`, `src/components/`). |
+| `samples/` | Example pipelines (`jp-support.json`, `kong-pii.json`), loaded into an empty store on first start.`jp-support.json` (Konnect/OpenAI), `lm-studio-support.json` (EN), `lm-studio-support-kr.json` (KR). |
 
 ## How a graph runs
 
-**Konnect AI Gateway:** LLM → model provider + model; native nodes → policies; custom/control nodes → one DataKit policy that POSTs to `/v1/segments/execute`.
+A pipeline becomes three kinds of Konnect AI Gateway entities, all labelled `pipeline: {slug}`:
+- **LLM** becomes a model provider `gs-{slug}-llm` and a model `gs-{slug}` that targets it. The model's route is `/pipelines/{slug}` (AI Gateway appends `/chat/completions`).
+- **Native nodes** (`ai_prompt_guard`, `kong_pii_sanitizer_ja`, `ai_sanitizer`, `ai_azure_content_safety`, …) each become a policy whose type is the Kong plugin name. The model lists the policies.
+  - **Kong PII Sanitizer (JA)** and **(EN)** (`kong_pii_sanitizer_ja`, `kong_pii_sanitizer_en`) are the [AI PII Sanitizer policy](https://developer.konghq.com/ai-gateway/policies/ai-sanitizer/), each backed by its own language's `ai-pii-service-{ja,en}` container. Each image understands only its language: the Japanese service returns an error for English text. All of them share the `ai-sanitizer` plugin with `ai_sanitizer`, so a pipeline can use only one, and so only one language. Like every native node, its masking shows only with the Playground's *Send via Kong*, not with *Dry run*.
+  - In Japanese text, names, addresses, phone numbers, dates, emails and IPs are masked. The service picks recognizers by the detected language, so credit cards and `custom_patterns` (registered for English only) are not detected in Japanese text. An email written right after kana (`メールはtaro@…`) is missed too, because there is no word boundary. Use `presidio_pii` or `regex_pii` for those.
+- **Custom and control nodes** (Llama Guard, Presidio PII, sentiment/kasuhara, Laya, keyword, condition, block) in one phase form a *segment*. One DataKit policy sends the segment spec plus the chat body to `POST /v1/segments/execute`. The engine returns either `allow` with the rewritten (masked) body, or `block` with a status. DataKit then writes the body upstream or exits with that status.
 
 **Kong Gateway Enterprise:** same DataKit / native plugin configs on a Service; LLM → `ai-proxy-advanced` target. Route path is `/pipelines/{slug}/chat/completions`.
 

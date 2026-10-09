@@ -99,6 +99,75 @@ _MASK_ACTION = {
 
 _PII_COMMON = {k: v for k, v in _DETECTOR_COMMON.items() if k != "on_detect"} | {"on_detect": _MASK_ACTION}
 
+# Kong ai-sanitizer `anonymize` values (the deprecated "domain" is left out; use "url").
+SANITIZER_PII_TYPES = (
+    "general", "phone", "email", "creditcard", "crypto", "date", "ip", "nrp", "ssn", "url",
+    "medical", "driverlicense", "passport", "bank", "nationalid", "custom", "credentials",
+    "all", "all_and_credentials",
+)
+
+
+# Kong AI PII Sanitizer, one node per language: each targets its own pulled
+# kong/ai-pii-service image (docker-compose.yml), which only understands that language.
+PII_SERVICE_VERSION = "v0.2.2"
+
+
+def _kong_pii_sanitizer(lang: str, language: str) -> NodeType:
+    return NodeType(
+        type=f"kong_pii_sanitizer_{lang}",
+        label=f"Kong PII Sanitizer ({lang.upper()})",
+        category="PII",
+        kind="native",
+        plugin="ai-sanitizer",
+        phases=(REQUEST, RESPONSE),
+        transforms_text=True,
+        description=f"Kong AI PII Sanitizer policy for {language} text, backed by the ai-pii-service-{lang} "
+                    f"container (kong/ai-pii-service:{PII_SERVICE_VERSION}-{lang}). All Kong PII Sanitizer and "
+                    "AI Sanitizer nodes share the ai-sanitizer plugin, so a pipeline can use only one of them.",
+        config_schema=_obj(
+            {
+                "host": {"type": "string", "default": f"ai-pii-service-{lang}"},
+                "port": {"type": "integer", "default": 8080},
+                "scheme": {"type": "string", "enum": ["http", "https"], "default": "http"},
+                "anonymize": {
+                    "type": "array",
+                    "title": "PII types",
+                    "uniqueItems": True,
+                    "items": {"type": "string", "enum": list(SANITIZER_PII_TYPES)},
+                    "default": ["general", "phone", "email", "creditcard"],
+                },
+                "custom_patterns": {
+                    "type": "array",
+                    "title": "Custom patterns",
+                    "description": "Regex patterns, used when 'custom' is in PII types.",
+                    "items": _obj(
+                        {
+                            "name": {"type": "string"},
+                            "regex": {"type": "string"},
+                            "score": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.5},
+                        },
+                        required=["name", "regex"],
+                    ),
+                },
+                "sanitization_mode": _guarding_mode(),
+                "redact_type": {
+                    "type": "string",
+                    "enum": ["placeholder", "synthetic"],
+                    "default": "placeholder",
+                    "description": "placeholder: PLACEHOLDER{i}. synthetic: a fake value of the same type.",
+                },
+                "recover_redacted": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Restore the original values in the response (input sanitization only).",
+                },
+                "block_if_detected": {"type": "boolean", "default": False},
+                "stop_on_error": {"type": "boolean", "default": True},
+            },
+            extra=True,
+        ),
+    )
+
 
 # --- Laya questions -----------------------------------------------------------
 # Laya's own question format ("type", "instructions", "criteria", "labels")
@@ -509,10 +578,10 @@ _TYPES: list[NodeType] = [
         plugin="ai-sanitizer",
         phases=(REQUEST, RESPONSE),
         transforms_text=True,
-        description="Kong ai-sanitizer: PII anonymization with the ai-pii-service container.",
+        description="Kong ai-sanitizer: PII anonymization with the ai-pii-service-en container (set host to ai-pii-service-ja for Japanese).",
         config_schema=_obj(
             {
-                "host": {"type": "string", "default": "ai-pii-service"},
+                "host": {"type": "string", "default": "ai-pii-service-en"},
                 "port": {"type": "integer", "default": 8080},
                 "anonymize": {"type": "array", "items": {"type": "string"}, "default": ["general", "phone", "email", "creditcard"]},
                 "sanitization_mode": _guarding_mode(),
@@ -524,6 +593,8 @@ _TYPES: list[NodeType] = [
             extra=True,
         ),
     ),
+    _kong_pii_sanitizer("ja", "Japanese"),
+    _kong_pii_sanitizer("en", "English"),
     NodeType(
         type="ai_prompt_decorator",
         label="Prompt Decorator",

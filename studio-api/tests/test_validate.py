@@ -69,6 +69,30 @@ def test_invalid_graphs(graph_of, mutate, expected):
     assert any(expected in e for e in errs), errs
 
 
+def _add_kong_pii_sanitizer(d, after="prompt_guard"):
+    """Insert a kong_pii_sanitizer_ja node right after `after` on the request path."""
+    nxt = next(e for e in d["edges"] if e["source"] == after)
+    d["nodes"].append({"id": "kong_pii", "type": "kong_pii_sanitizer_ja", "config": {}})
+    d["edges"].append({"source": after, "target": "kong_pii"})
+    nxt["source"] = "kong_pii"
+
+
+def test_kong_pii_sanitizer_on_main_path_is_valid(graph_of):
+    g = graph_of(lambda d: _add_kong_pii_sanitizer(d, after="in"))
+    assert validate(g).ok, errors(g)
+
+
+@pytest.mark.parametrize("other", ["kong_pii_sanitizer_en", "ai_sanitizer"])
+def test_sanitizer_nodes_share_one_plugin(graph_of, other):
+    def mutate(d):
+        _add_kong_pii_sanitizer(d, after="in")
+        nxt = next(e for e in d["edges"] if e["source"] == "kong_pii")
+        d["nodes"].append({"id": "ai_san", "type": other, "config": {}})
+        d["edges"].append({"source": "kong_pii", "target": "ai_san"})
+        nxt["source"] = "ai_san"
+    assert any("one 'ai-sanitizer'" in e for e in errors(graph_of(mutate)))
+
+
 def test_literal_secret_warns(graph_of):
     g = graph_of(lambda d: d["nodes"][7]["config"].update(auth_header_value="Bearer sk-live-123"))
     warns = [i.message for i in validate(g).issues if i.level == "warning"]

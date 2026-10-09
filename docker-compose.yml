@@ -29,6 +29,10 @@ services:
     depends_on:
       guardrail-engine:
         condition: service_healthy
+      ai-pii-service-ja:
+        condition: service_started
+      ai-pii-service-en:
+        condition: service_started
     healthcheck:
       test: ["CMD", "kong", "health"]
       interval: 10s
@@ -56,6 +60,22 @@ services:
       interval: 10s
       start_period: 300s   # first start downloads the sentiment model
       retries: 30
+
+  # Backends of the ai-sanitizer policy, one pulled image per language
+  # (Kong PII Sanitizer (JA) / (EN) nodes). Each needs ~1GB RAM.
+  ai-pii-service-ja:
+    image: kong/ai-pii-service:v0.2.2-ja
+    environment:
+      GUNICORN_WORKERS: "1"
+    ports:
+      - "18090:8080"     # direct access for debugging: POST /llm/v1/sanitize
+
+  ai-pii-service-en:
+    image: kong/ai-pii-service:v0.2.2-en
+    environment:
+      GUNICORN_WORKERS: "1"
+    ports:
+      - "18091:8080"
 
   studio-api:
     build:
